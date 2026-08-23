@@ -329,8 +329,16 @@ def walk_forward(
             weights = provider.weights(combo_id, fold, "train")
             pnl = portfolio_pnl(weights, train_returns, bt.cost_bps, bt.delay)
             scores.append(objective_value(pnl, sel.objective, bt.annualization))
-        finite = [s if np.isfinite(s) else -np.inf for s in scores]
-        best_id = int(np.argmax(finite))
+        finite = np.array([s if np.isfinite(s) else -np.inf for s in scores])
+        # Objectives that agree to nine decimals are the same objective; the
+        # remaining difference is floating-point noise (summation order alone
+        # moves a daily P&L sum by ~1e-17). Left unrounded, argmax lets that
+        # noise pick the parameter set whenever a grid contains settings that
+        # are inert on the training window - an unbinding leverage cap, a
+        # rebalance threshold that never triggers - which made the study
+        # irreproducible across refactors. Rounding first makes ties resolve to
+        # the earliest grid entry, i.e. the paper's documented default.
+        best_id = int(np.argmax(np.round(finite, 9)))
         if finite[best_id] == -np.inf and sel.fallback_to_default:
             best_id = next((i for i, c in enumerate(combos) if c == defaults), 0)
 
@@ -414,14 +422,28 @@ def common_folds(strategies: Iterable[Strategy], panel: Panel, cfg: Config) -> l
 
 def buy_and_hold(panel: Panel, cfg: Config, index: pd.Index | None = None) -> WalkForwardResult:
     """Long-only equal-weight benchmark, evaluated over the same days and under
-    the same weight-target accounting as every strategy."""
-    returns = panel.returns if index is None else panel.returns.reindex(index)
+    the same weight-target accounting as every strategy.
+
+    When ``index`` is given the benchmark covers *exactly* those days.  The
+    schedule is extended ``delay`` bars earlier so the first day is funded by a
+    weight set the session before, then trimmed back - otherwise the benchmark
+    would silently start a day after the strategies it is compared against.
+    """
+    delay = cfg.backtest.delay
+    if index is None:
+        returns = panel.returns
+        target_index = returns.index[delay:]
+    else:
+        full = panel.returns.index
+        start = full.get_indexer([index[0]], method="nearest")[0]
+        extended = full[max(0, start - delay) : full.get_indexer([index[-1]], method="nearest")[0] + 1]
+        returns = panel.returns.reindex(extended)
+        target_index = index
     n = returns.shape[1]
     weights = pd.DataFrame(1.0 / n, index=returns.index, columns=returns.columns)
-    parts = asset_pnl(weights, returns, cfg.backtest.cost_bps, cfg.backtest.delay)
-    parts = {name: frame.iloc[cfg.backtest.delay :] for name, frame in parts.items()}
-    daily = portfolio_pnl(weights, returns, cfg.backtest.cost_bps, cfg.backtest.delay)
-    daily = daily.iloc[cfg.backtest.delay :]
+    parts = asset_pnl(weights, returns, cfg.backtest.cost_bps, delay)
+    parts = {name: frame.reindex(target_index) for name, frame in parts.items()}
+    daily = portfolio_pnl(weights, returns, cfg.backtest.cost_bps, delay).reindex(target_index)
     stats = m.summarize(
         daily["net_return"],
         gross_returns=daily["gross_return"],

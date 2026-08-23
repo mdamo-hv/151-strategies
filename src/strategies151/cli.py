@@ -3,15 +3,24 @@
 from __future__ import annotations
 
 import argparse
+import json
 import logging
 import sys
 from dataclasses import replace
+from datetime import datetime
 from pathlib import Path
 
 import pandas as pd
 
 from strategies151 import catalog
+from strategies151.backtest.charts import summary_chart, ticker_chart
 from strategies151.backtest.engine import buy_and_hold, common_folds, walk_forward
+from strategies151.backtest.perticker import (
+    ACTIVE,
+    run_ticker_study,
+    studies_frame,
+    winners_frame,
+)
 from strategies151.backtest.report import (
     leaderboard,
     markdown_summary,
@@ -20,7 +29,7 @@ from strategies151.backtest.report import (
     ticker_performance,
     write_results,
 )
-from strategies151.config import Config
+from strategies151.config import REPO_ROOT, Config
 from strategies151.data.loaders import load_universe
 from strategies151.data.panel import load_panel
 from strategies151.data.questdb import QuestDBClient
@@ -193,6 +202,163 @@ def cmd_backtest(args, cfg: Config) -> int:
     return 0
 
 
+def cmd_per_ticker(args, cfg: Config) -> int:
+    """Find the best strategy for each ticker individually and chart it."""
+    if args.tickers:
+        cfg = replace(cfg, universe=replace(cfg.universe, tickers=args.tickers))
+    if args.train_days or args.test_days or args.cost_bps is not None:
+        bt = cfg.backtest
+        cfg = replace(
+            cfg,
+            backtest=replace(
+                bt,
+                train_days=args.train_days or bt.train_days,
+                test_days=args.test_days or bt.test_days,
+                step_days=args.test_days or bt.step_days,
+                cost_bps=bt.cost_bps if args.cost_bps is None else args.cost_bps,
+            ),
+        )
+
+    panel = load_panel(cfg)
+    stamp = args.stamp or datetime.now().strftime("%Y%m%d%H%M")
+    output_dir = Path(args.output or (REPO_ROOT / "data")) / stamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+    log.info("writing per-ticker study to %s", output_dir)
+
+    studies = []
+    for ticker in panel.tickers:
+        study = run_ticker_study(ticker, panel, cfg, strategy_keys=args.strategies)
+        studies.append(study)
+        if study.best is None:
+            log.info("%-6s no applicable strategy on a one-name universe", ticker)
+        else:
+            log.info(
+                "%-6s best %-38s sharpe %5.2f  ann.return %7.2f%%  max.dd %7.2f%%  calmar %5.2f",
+                ticker,
+                f"{study.best.section} {study.best.title}",
+                study.best_stats.get("sharpe", float("nan")),
+                study.best_stats.get("cagr", float("nan")) * 100,
+                study.best_stats.get("max_drawdown", float("nan")) * 100,
+                study.best_stats.get("calmar", float("nan")),
+            )
+        chart = ticker_chart(study, output_dir / f"{ticker}.png")
+        study.table.assign(params=study.table["params"].apply(json.dumps, default=str)).to_csv(
+            output_dir / f"{ticker}_strategies.csv", index=False
+        )
+        log.info("  chart: %s", chart)
+
+    winners = winners_frame(studies)
+    winners.to_csv(output_dir / "best_per_ticker.csv", index=False)
+    studies_frame(studies).to_csv(output_dir / "all_results.csv", index=False)
+    summary_chart(
+        winners,
+        output_dir / "summary.png",
+        subtitle=(
+            f"Each ticker tested on its own against all {studies[0].tested} strategies. "
+            f"{cfg.backtest.train_days}d train \u2192 {cfg.backtest.test_days}d test, walked "
+            f"forward {studies[0].folds} times, {cfg.backtest.cost_bps:.0f} bps costs.\n"
+            "Bars are the winning strategy's Sharpe; the marker is that ticker's own buy & hold."
+        ),
+    )
+    (output_dir / "summary.md").write_text(_per_ticker_markdown(studies, winners, cfg, panel))
+    (output_dir / "index.html").write_text(_per_ticker_html(studies, stamp))
+
+    _print(
+        winners.assign(
+            ann_return_pct=(winners["cagr"] * 100).round(2),
+            max_drawdown_pct=(winners["max_drawdown"] * 100).round(2),
+            sharpe=winners["sharpe"].round(2),
+            calmar=winners["calmar"].round(2),
+        ).loc[:, ["ticker", "section", "best_strategy", "ann_return_pct", "sharpe",
+                  "max_drawdown_pct", "calmar", "applicable_strategies"]]
+    )
+    print(f"\nartifacts written to {output_dir}")
+    return 0
+
+
+def _per_ticker_markdown(studies, winners: pd.DataFrame, cfg: Config, panel) -> str:
+    lines = [
+        "# Best strategy per ticker",
+        "",
+        f"* Universe tested one name at a time: `{', '.join(panel.tickers)}`",
+        f"* Bars: `{cfg.questdb.table}`, {len(panel)} rows, "
+        f"{panel.dates[0].date()} to {panel.dates[-1].date()}",
+        f"* Windows: {cfg.backtest.train_days} training days -> "
+        f"{cfg.backtest.test_days} test days, walked forward",
+        f"* Transaction cost: {cfg.backtest.cost_bps} bps, delay {cfg.backtest.delay}",
+        "",
+        "Roughly half the library is cross-sectional and cannot express a view on a "
+        "single name: demeaning one stock's return against itself gives zero, and a "
+        "top third that is also the bottom third nets out. Those are detected and "
+        "excluded from the ranking with the reason recorded in "
+        "`<TICKER>_strategies.csv`.",
+        "",
+    ]
+    display = winners.copy()
+    for column in ("cagr", "max_drawdown", "buy_hold_cagr", "buy_hold_max_drawdown"):
+        if column in display:
+            display[column] = (display[column] * 100).round(2)
+    for column in ("sharpe", "calmar", "buy_hold_sharpe", "sharpe_vs_buy_hold", "ann_turnover"):
+        if column in display:
+            display[column] = display[column].round(2)
+    keep = ["ticker", "section", "best_strategy", "cagr", "sharpe", "max_drawdown",
+            "calmar", "buy_hold_sharpe", "sharpe_vs_buy_hold", "applicable_strategies"]
+    keep = [c for c in keep if c in display]
+    display = display.loc[:, keep].rename(
+        columns={"cagr": "ann_return_%", "max_drawdown": "max_drawdown_%"}
+    )
+    lines += [display.to_markdown(index=False), ""]
+
+    for study in studies:
+        lines += [f"## {study.ticker}", ""]
+        if study.best is None:
+            lines += ["No applicable strategy.", ""]
+            continue
+        lines += [
+            f"**{study.best.section} {study.best.title}** — "
+            f"{study.applicable} of {study.tested} strategies applicable.",
+            "",
+            "Parameters selected in-sample:",
+            "",
+            "```",
+            "\n".join(f"{k} = {v}" for k, v in study.best_params.items()),
+            "```",
+            "",
+            f"![{study.ticker}]({study.ticker}.png)",
+            "",
+        ]
+    return "\n".join(lines)
+
+
+def _per_ticker_html(studies, stamp: str) -> str:
+    cards = "\n".join(
+        f'  <section><h2>{s.ticker}'
+        + (f' <small>{s.best.section} {s.best.title}</small>' if s.best else ' <small>no applicable strategy</small>')
+        + f'</h2><img src="{s.ticker}.png" alt="{s.ticker} chart"></section>'
+        for s in studies
+    )
+    return f"""<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<title>Best strategy per ticker - {stamp}</title>
+<style>
+  body {{ background: #f9f9f7; color: #0b0b0b; margin: 0; padding: 32px;
+         font: 15px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }}
+  h1 {{ font-size: 22px; margin: 0 0 4px; }}
+  p.sub {{ color: #52514e; margin: 0 0 28px; }}
+  h2 {{ font-size: 16px; margin: 0 0 10px; }}
+  h2 small {{ color: #52514e; font-weight: 400; margin-left: 8px; }}
+  section {{ background: #fcfcfb; border: 1px solid rgba(11,11,11,0.10);
+             border-radius: 8px; padding: 18px; margin-bottom: 24px; }}
+  img {{ width: 100%; height: auto; display: block; }}
+</style></head><body>
+<h1>Best strategy per ticker</h1>
+<p class="sub">Walk-forward study generated {stamp}. Full tables in
+<code>best_per_ticker.csv</code> and <code>all_results.csv</code>.</p>
+<section><h2>Summary</h2><img src="summary.png" alt="summary chart"></section>
+{cards}
+</body></html>
+"""
+
 # --------------------------------------------------------------------- parser --
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
@@ -246,6 +412,19 @@ def build_parser() -> argparse.ArgumentParser:
              "(default: share one fold schedule so results are comparable)",
     )
     p_bt.set_defaults(func=cmd_backtest, align_folds=True)
+
+    p_pt = sub.add_parser(
+        "per-ticker",
+        help="find the best strategy for each ticker on its own and chart it",
+    )
+    p_pt.add_argument("--tickers", nargs="+")
+    p_pt.add_argument("--strategies", nargs="+", help="restrict the search (default: all)")
+    p_pt.add_argument("--train-days", type=int)
+    p_pt.add_argument("--test-days", type=int)
+    p_pt.add_argument("--cost-bps", type=float)
+    p_pt.add_argument("--output", help="root directory (default: data/)")
+    p_pt.add_argument("--stamp", help="folder name (default: YYYYMMDDHHMM)")
+    p_pt.set_defaults(func=cmd_per_ticker)
     return parser
 
 

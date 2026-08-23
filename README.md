@@ -30,6 +30,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
 ./.venv/bin/s151 strategies                 # what is runnable here
 ./.venv/bin/s151 backtest                   # the study
 ./.venv/bin/s151 backtest --strategies 3.1.price_momentum 3.9.mean_reversion_single_cluster
+./.venv/bin/s151 per-ticker                 # best strategy for each name -> data/
 ```
 
 Everything is configured in [`configs/default.yaml`](configs/default.yaml);
@@ -126,8 +127,8 @@ Out-of-sample, 2016-03-11 to 2026-08-18, 125 folds, net of 5 bps costs. **Annual
 
 | Section | Strategy | Ann. return | Sharpe | Max drawdown | Calmar | Ann. vol | Turnover |
 |---|---|---:|---:|---:|---:|---:|---:|
-| 6.5 | Volatility targeting with risk-free asset | 26.0% | **1.59** | -20.8% | 1.25 | 15.3% | 3.3x |
-| *–* | *Equal-weighted buy & hold (benchmark)* | *37.5%* | *1.38* | *-40.0%* | *0.94* | *25.4%* | *0.1x* |
+| 6.5 | Volatility targeting with risk-free asset | 28.9% | **1.62** | -21.4% | 1.35 | 16.5% | 3.1x |
+| *–* | *Equal-weighted buy & hold (benchmark)* | *37.6%* | *1.38* | *-40.0%* | *0.94* | *25.4%* | *0.1x* |
 | 4.1 | Momentum rotation | 61.1% | **1.29** | -58.1% | 1.05 | 44.6% | 26.3x |
 | 4.6 | Multi-asset trend following | 38.3% | **1.21** | -47.0% | 0.81 | 30.8% | 23.3x |
 | 4.1.2 | Dual-momentum rotation | 34.3% | **1.10** | -51.3% | 0.67 | 31.1% | 25.4x |
@@ -235,6 +236,87 @@ the universe.
 Add `--per-ticker-daily` to also write each strategy's daily per-ticker
 contributions to `results/by_ticker/` (~300 KB per strategy, off by default).
 
+
+## Best strategy per ticker
+
+`s151 per-ticker` re-runs the whole library against **each name on its own** and
+writes a timestamped folder under `data/`:
+
+```bash
+s151 per-ticker                       # -> data/YYYYMMDDHHMM/
+s151 per-ticker --tickers NVDA JPM    # a subset
+```
+
+```
+data/202608231534/
+  summary.png            best strategy per ticker, one bar each
+  summary.md             the same as text, with per-ticker sections
+  index.html             browsable page embedding every chart
+  best_per_ticker.csv    winner, parameters and margin over buy & hold
+  all_results.csv        every (ticker, strategy) pair with its statistics
+  NVDA.png               research card - price, position, equity, ranking, parameters
+  NVDA_strategies.csv    every strategy ranked for that ticker
+  ...
+```
+
+![Best strategy per ticker](data/202608231534/summary.png)
+
+### Not every strategy can be tested on one name
+
+Roughly half the library is **cross-sectional** - it ranks names against each
+other or demeans returns across them. On a universe of one those constructions
+cancel exactly: a stock's return demeaned against itself is zero, and a "top
+third" that is also the "bottom third" nets out. Others degenerate the other
+way - a long-only ranking of one name is just buy & hold.
+
+Both are detected and excluded from the ranking with the reason recorded in
+`<TICKER>_strategies.csv`, so **11 of 28** strategies are genuinely applicable
+per ticker. Screening happens before the walk-forward, which is also what makes
+the study affordable: it sweeps each grid once over the full history instead of
+125 times per fold.
+
+### Results
+
+| Ticker | Best strategy | Ann. return | Sharpe | Max drawdown | Calmar | Buy & hold Sharpe | Edge |
+|---|---|---:|---:|---:|---:|---:|---:|
+| **NVDA** | 4.1.2 Dual-momentum rotation | 60.8% | 1.37 | -41.8% | 1.46 | 1.34 | +0.02 |
+| **TSLA** | 6.5 Volatility targeting with risk-free asset | 11.5% | 0.75 | -25.9% | 0.44 | 0.82 | -0.07 |
+| **MSFT** | 6.5 Volatility targeting with risk-free asset | 15.7% | 0.95 | -25.0% | 0.63 | 0.96 | -0.01 |
+| **AMZN** | 6.5 Volatility targeting with risk-free asset | 12.5% | 0.72 | -35.3% | 0.35 | 0.82 | -0.10 |
+| **WMT** | 6.5 Volatility targeting with risk-free asset | 17.1% | 0.95 | -23.3% | 0.74 | 0.91 | +0.04 |
+| **JPM** | 4.6 Multi-asset trend following | 16.1% | 0.85 | -33.9% | 0.48 | 0.88 | -0.03 |
+
+Parameters chosen in-sample (most frequent across the 125 training windows):
+
+| Ticker | Section | Parameters |
+|---|---|---|
+| **NVDA** | 4.1.2 | `formation = 252`, `fraction = 0.34`, `ma_length = 200 (86% of folds)` |
+| **TSLA** | 6.5 | `target_vol = 0.15`, `vol_window = 63 (61% of folds)`, `max_leverage = 1.0`, `rebalance_threshold = 0.1 (78% of folds)` |
+| **MSFT** | 6.5 | `target_vol = 0.15 (62% of folds)`, `vol_window = 21 (52% of folds)`, `max_leverage = 1.0 (64% of folds)`, `rebalance_threshold = 0.1 (58% of folds)` |
+| **AMZN** | 6.5 | `target_vol = 0.15 (62% of folds)`, `vol_window = 21 (78% of folds)`, `max_leverage = 1.0 (78% of folds)`, `rebalance_threshold = 0.0 (58% of folds)` |
+| **WMT** | 6.5 | `target_vol = 0.15 (46% of folds)`, `vol_window = 21 (67% of folds)`, `max_leverage = 1.0 (54% of folds)`, `rebalance_threshold = 0.1 (74% of folds)` |
+| **JPM** | 4.6 | `formation = 252 (50% of folds)`, `weighting = inverse_vol`, `ma_filter = True (54% of folds)`, `ma_length = 200 (75% of folds)` |
+
+Each ticker's card shows the price series with the winning strategy's long and
+short periods shaded, its equity curve against buy & hold, the full ranking, and
+the parameters:
+
+![NVDA](data/202608231534/NVDA.png)
+
+### Read the "Edge" column before anything else
+
+The winner beats that ticker's own buy & hold by **+0.02 to +0.04 Sharpe on two
+names, and loses on the other four**. That is nothing.
+
+It is also flattered: picking the best of 11 strategies *by out-of-sample
+Sharpe* is a selection made on the test set, so the winner's margin is
+optimistically biased by construction - the maximum of 11 noisy estimates sits
+above their common mean even when no strategy has an edge. The honest reading is
+that on a single mega-cap over this period, **none of the paper's single-name
+strategies reliably beat holding the stock**. What 6.5 and 4.1.2 do deliver is
+materially smaller drawdowns (NVDA -41.8% against -66.3%, AMZN -35.3% against
+-56.2%) at a comparable Sharpe - risk reduction, not alpha.
+
 ---
 
 ## What is implemented, and what is not
@@ -336,9 +418,11 @@ src/strategies151/
   backtest/
     windows.py            the sliding train/test schedule
     engine.py             tuning, P&L accounting, walk-forward driver
+    perticker.py          per-name study: applicability screening + ranking
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
-tests/                    187 tests, including the causality guard
+    charts.py             research cards and the per-ticker summary chart
+tests/                    250 tests: causality, attribution, applicability
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an

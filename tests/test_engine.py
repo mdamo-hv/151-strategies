@@ -7,6 +7,7 @@ import pandas as pd
 import pytest
 
 from strategies151.backtest.engine import buy_and_hold, common_folds, walk_forward
+from strategies151.backtest.windows import make_folds
 from strategies151.backtest.report import leaderboard, markdown_summary
 from strategies151.config import Config
 from strategies151.data.panel import Panel
@@ -154,3 +155,63 @@ def test_markdown_summary_labels_units_in_the_header(panel: Panel, cfg: Config):
     text = markdown_summary(board)
     for column in ("ann_return_%", "sharpe", "max_drawdown_%", "calmar"):
         assert column in text
+
+
+def test_benchmark_covers_exactly_the_requested_days(panel: Panel, cfg: Config):
+    """The benchmark must line up day-for-day with the strategies it is compared to.
+
+    Without extending the schedule one bar earlier, funding the first day
+    consumes it and the benchmark starts a session late.
+    """
+    result = walk_forward(build("3.15.channel"), panel, cfg)
+    bench = buy_and_hold(panel, cfg, index=result.daily.index)
+    assert bench.daily.index.equals(result.daily.index)
+    assert np.isfinite(bench.daily["net_return"].to_numpy()).all()
+
+
+def test_benchmark_without_an_index_still_drops_the_unfunded_day(panel: Panel, cfg: Config):
+    bench = buy_and_hold(panel, cfg)
+    assert bench.daily.index[0] == panel.close.index[cfg.backtest.delay]
+
+
+def test_parameter_selection_is_stable_under_summation_order(panel: Panel, cfg: Config):
+    """Selection must not hinge on floating-point noise.
+
+    Summing per-name P&L before or after netting costs changes a daily total by
+    ~1e-17. If the winner is chosen by a bare argmax, that is enough to flip
+    which parameter set is picked whenever two settings are inert on the
+    training window - and the out-of-sample track record changes with it.
+    """
+    from strategies151.backtest.engine import asset_pnl, objective_value, portfolio_pnl
+    from strategies151.strategies.registry import get
+
+    strategy_cls = get("6.5.volatility_targeting")
+    combos = list(strategy_cls.grid())
+    folds = make_folds(len(panel), cfg.backtest.train_days, cfg.backtest.test_days,
+                       warmup=build("6.5.volatility_targeting").warmup)
+    weights = [strategy_cls(**p).weights(panel) for p in combos]
+    fold = folds[0]
+    train_returns = panel.returns.iloc[fold.train_start : fold.train_end]
+
+    def scores(sum_first: bool):
+        out = []
+        for frame in weights:
+            window = frame.iloc[fold.train_start : fold.train_end]
+            if sum_first:
+                out.append(objective_value(
+                    portfolio_pnl(window, train_returns, cfg.backtest.cost_bps, 1),
+                    "sharpe", 252))
+            else:
+                parts = asset_pnl(window, train_returns, cfg.backtest.cost_bps, 1)
+                pnl = pd.DataFrame({"net_return": (parts["gross"] - parts["cost"]).sum(axis=1)})
+                out.append(objective_value(pnl, "sharpe", 252))
+        return np.array([s if np.isfinite(s) else -np.inf for s in out])
+
+    a, b = scores(True), scores(False)
+    assert np.argmax(np.round(a, 9)) == np.argmax(np.round(b, 9))
+
+
+def test_selection_prefers_the_documented_default_on_a_tie():
+    """A tie resolves to the earliest grid entry, which is the paper's default."""
+    scores = np.array([0.5, 0.5 + 1e-15, 0.2])
+    assert int(np.argmax(np.round(scores, 9))) == 0

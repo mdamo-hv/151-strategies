@@ -138,6 +138,9 @@ class MeanReversionMultiCluster(Strategy):
         from sklearn.cluster import AgglomerativeClustering
 
         rets = train.log_returns.dropna(how="all").fillna(0.0)
+        if rets.shape[1] < 2:  # nothing to cluster on a one-name universe
+            self.clusters = {}
+            return self
         k = min(self.params["n_clusters"], max(1, rets.shape[1] - 1))
         corr = rets.corr().fillna(0.0).to_numpy()
         distance = np.clip(1.0 - corr, 0.0, 2.0)

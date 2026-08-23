@@ -15,13 +15,27 @@ from strategies151.data.panel import Panel
 # --------------------------------------------------------------------------- #
 # Weight primitives (Section 3.1, 3.9, 3.18 of the paper)
 # --------------------------------------------------------------------------- #
+#: Rows whose gross exposure is below this are treated as "no position".
+#: Without the floor, a row of floating-point residue - which is what a
+#: cross-sectional construction produces when its signal cancels exactly, e.g.
+#: demeaning a one-name universe - would be rescaled to a full-size position
+#: with an essentially arbitrary sign.
+GROSS_EPSILON = 1e-12
+
+
 def normalize_gross(weights: pd.Series | pd.DataFrame, level: float = 1.0):
-    """Scale so ``sum |w_i| == level``, Eq. (272)/(346). All-zero rows stay zero."""
+    """Scale so ``sum |w_i| == level``, Eq. (272)/(346).
+
+    Rows with no meaningful exposure stay flat rather than being amplified.
+    """
     if isinstance(weights, pd.Series):
         gross = weights.abs().sum()
-        return weights * (level / gross) if gross > 0 else weights
+        return weights * (level / gross) if gross > GROSS_EPSILON else weights * 0.0
     gross = weights.abs().sum(axis=1)
-    scale = pd.Series(np.where(gross > 0, level / gross.replace(0, np.nan), 0.0), index=gross.index)
+    scale = pd.Series(
+        np.where(gross > GROSS_EPSILON, level / gross.replace(0, np.nan), 0.0),
+        index=gross.index,
+    )
     return weights.mul(scale, axis=0).fillna(0.0)
 
 

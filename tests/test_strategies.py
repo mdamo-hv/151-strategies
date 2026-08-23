@@ -145,3 +145,56 @@ def test_resolve_returns_every_registered_strategy():
     keys = {s.key for s in resolve()}
     assert set(REGISTRY) <= keys
     assert "3.20.alpha_combo" in keys
+
+
+def test_normalize_gross_does_not_amplify_numerical_residue():
+    """A cancelled cross-sectional signal must stay flat, not become a position."""
+    dust = pd.DataFrame({"A": [1e-19, 0.0], "B": [-3e-18, 0.0]})
+    out = normalize_gross(dust)
+    assert (out.abs().to_numpy() == 0).all()
+
+
+def test_normalize_gross_still_scales_real_signals():
+    real = pd.DataFrame({"A": [1e-6], "B": [-3e-6]})
+    assert normalize_gross(real).abs().sum(axis=1).iloc[0] == pytest.approx(1.0)
+
+
+#: These rank or demean names against each other, so on a universe of one their
+#: signal cancels exactly and only floating-point residue is left.
+CROSS_SECTIONAL_KEYS = [
+    "3.1.price_momentum",
+    "3.4.low_volatility",
+    "3.6.multifactor",
+    "3.9.mean_reversion_single_cluster",
+    "3.10.mean_reversion_weighted_regression",
+    "3.18.stat_arb_optimization",
+    "10.3.contrarian",
+]
+
+
+@pytest.mark.parametrize("key", CROSS_SECTIONAL_KEYS)
+def test_cross_sectional_strategies_stay_flat_on_one_name(key, panel: Panel):
+    """A cancelled signal must produce no position, not an arbitrary one.
+
+    Without a gross-exposure floor the normaliser rescales residue of order
+    1e-18 into a full-size long or short whose sign is pure numerical accident.
+    """
+    single = Panel(**{f: getattr(panel, f)[[panel.tickers[0]]] for f in
+                      ("open", "high", "low", "close", "volume")})
+    strategy = build(key)
+    train = single.slice(0, 700)
+    strategy.fit(train, context=train)
+    weights = strategy.weights(single)
+    assert (weights.abs().to_numpy() == 0).all()
+
+
+@pytest.mark.parametrize("key", ALL_STRATEGIES)
+def test_single_name_weights_are_finite_and_bounded(key, panel: Panel):
+    single = Panel(**{f: getattr(panel, f)[[panel.tickers[0]]] for f in
+                      ("open", "high", "low", "close", "volume")})
+    strategy = build(key)
+    train = single.slice(0, 700)
+    strategy.fit(train, context=train)
+    gross = strategy.weights(single).abs().sum(axis=1)
+    assert np.isfinite(gross.to_numpy()).all()
+    assert (gross <= 1.0 + 1e-9).all()
