@@ -1,0 +1,217 @@
+from __future__ import annotations
+
+from dataclasses import replace
+
+import numpy as np
+import pandas as pd
+import pytest
+
+from strategies151.backtest.engine import buy_and_hold, common_folds, walk_forward
+from strategies151.backtest.windows import make_folds
+from strategies151.backtest.report import leaderboard, markdown_summary
+from strategies151.config import Config
+from strategies151.data.panel import Panel
+from strategies151.strategies.registry import build
+
+
+@pytest.fixture(scope="module")
+def cfg() -> Config:
+    base = Config()
+    return replace(base, backtest=replace(base.backtest, train_days=252, test_days=21))
+
+
+@pytest.fixture(scope="module")
+def result(panel: Panel, cfg: Config):
+    return walk_forward(build("3.11.single_moving_average"), panel, cfg)
+
+
+def test_out_of_sample_days_equal_folds_times_test_length(result, cfg):
+    expected = int(result.stats["folds"]) * cfg.backtest.test_days - cfg.backtest.delay
+    assert len(result.daily) == expected
+
+
+def test_every_fold_records_its_chosen_parameters(result):
+    assert not result.folds.empty
+    assert result.folds["params"].map(lambda p: isinstance(p, dict)).all()
+    assert (result.folds["grid_size"] > 1).all()
+
+
+def test_training_windows_precede_their_test_windows(result):
+    assert (result.folds["train_end"] < result.folds["test_start"]).all()
+
+
+def test_test_windows_do_not_overlap(result):
+    starts = result.folds["test_start"].tolist()
+    ends = result.folds["test_end"].tolist()
+    for previous_end, next_start in zip(ends, starts[1:]):
+        assert previous_end < next_start
+
+
+def test_daily_track_record_is_finite(result):
+    assert np.isfinite(result.daily["net_return"].to_numpy()).all()
+    assert (result.daily["gross_exposure"] <= 1.0 + 1e-9).all()
+
+
+def test_net_is_gross_minus_cost(result):
+    diff = result.daily["gross_return"] - result.daily["cost"] - result.daily["net_return"]
+    assert diff.abs().max() < 1e-12
+
+
+def test_zero_cost_dominates_positive_cost(panel: Panel, cfg: Config):
+    free = replace(cfg, backtest=replace(cfg.backtest, cost_bps=0.0))
+    charged = replace(cfg, backtest=replace(cfg.backtest, cost_bps=50.0))
+    strategy_free = walk_forward(build("3.15.channel"), panel, free)
+    strategy_charged = walk_forward(build("3.15.channel"), panel, charged)
+    assert strategy_free.daily["net_return"].sum() > strategy_charged.daily["net_return"].sum()
+
+
+def test_stateful_strategy_runs_end_to_end(panel: Panel, cfg: Config):
+    result = walk_forward(build("3.8.pairs_trading"), panel, cfg)
+    assert len(result.daily) > 0
+    assert "fitted_pair" in result.folds.columns
+
+
+def test_common_folds_are_shared_by_every_strategy(panel: Panel, cfg: Config):
+    strategies = [build("3.11.single_moving_average"), build("3.4.low_volatility")]
+    folds = common_folds(strategies, panel, cfg)
+    results = [walk_forward(s, panel, cfg, folds=folds) for s in strategies]
+    assert results[0].daily.index.equals(results[1].daily.index)
+
+
+def test_insufficient_history_is_reported_clearly(panel: Panel, cfg: Config):
+    short = panel.slice(0, 300)
+    with pytest.raises(ValueError, match="not enough history"):
+        walk_forward(build("3.1.price_momentum"), short, cfg)
+
+
+def test_benchmark_is_long_only_and_fully_invested(panel: Panel, cfg: Config):
+    bench = buy_and_hold(panel, cfg)
+    assert bench.daily["gross_exposure"].iloc[-1] == pytest.approx(1.0)
+    assert bench.daily["net_exposure"].iloc[-1] == pytest.approx(1.0)
+
+
+def test_leaderboard_is_sorted_by_sharpe(panel: Panel, cfg: Config):
+    results = [
+        walk_forward(build(k), panel, cfg)
+        for k in ("3.11.single_moving_average", "3.4.low_volatility")
+    ]
+    board = leaderboard(results)
+    sharpes = board["sharpe"].dropna().tolist()
+    assert sharpes == sorted(sharpes, reverse=True)
+    assert "# 151 Strategies" in markdown_summary(board)
+
+
+def test_display_frame_leads_with_the_headline_metrics():
+    from strategies151.backtest.report import display_frame
+
+    board = pd.DataFrame(
+        {
+            "section": ["3.1"],
+            "title": ["Price-momentum"],
+            "style": ["momentum"],
+            "folds": [125.0],
+            "days": [2624.0],
+            "cagr": [0.2602],
+            "sharpe": [1.5890],
+            "max_drawdown": [-0.2079],
+            "calmar": [1.2517],
+            "ann_volatility": [0.1530],
+            "hit_rate": [0.5659],
+            "ann_turnover": [3.3051],
+        }
+    )
+    display = display_frame(board)
+    assert list(display.columns)[5:9] == ["ann_return_%", "sharpe", "max_drawdown_%", "calmar"]
+
+
+def test_display_frame_converts_fractions_to_percentages():
+    from strategies151.backtest.report import display_frame
+
+    board = pd.DataFrame(
+        {"cagr": [0.2602], "sharpe": [1.589], "max_drawdown": [-0.2079], "calmar": [1.2517]}
+    )
+    display = display_frame(board)
+    assert display["ann_return_%"].iloc[0] == pytest.approx(26.02)
+    assert display["max_drawdown_%"].iloc[0] == pytest.approx(-20.79)
+    # Ratios stay ratios.
+    assert display["sharpe"].iloc[0] == pytest.approx(1.59)
+    assert display["calmar"].iloc[0] == pytest.approx(1.25)
+
+
+def test_leaderboard_csv_keeps_raw_fractions(panel: Panel, cfg: Config):
+    from strategies151.backtest.report import leaderboard
+
+    result = walk_forward(build("3.4.low_volatility"), panel, cfg)
+    board = leaderboard([result])
+    # Presentation scaling must not leak back into the machine-readable output.
+    assert abs(board["max_drawdown"].iloc[0]) <= 1.0
+    assert list(board.columns)[6:10] == ["cagr", "sharpe", "max_drawdown", "calmar"]
+
+
+def test_markdown_summary_labels_units_in_the_header(panel: Panel, cfg: Config):
+    from strategies151.backtest.report import leaderboard, markdown_summary
+
+    board = leaderboard([walk_forward(build("3.4.low_volatility"), panel, cfg)])
+    text = markdown_summary(board)
+    for column in ("ann_return_%", "sharpe", "max_drawdown_%", "calmar"):
+        assert column in text
+
+
+def test_benchmark_covers_exactly_the_requested_days(panel: Panel, cfg: Config):
+    """The benchmark must line up day-for-day with the strategies it is compared to.
+
+    Without extending the schedule one bar earlier, funding the first day
+    consumes it and the benchmark starts a session late.
+    """
+    result = walk_forward(build("3.15.channel"), panel, cfg)
+    bench = buy_and_hold(panel, cfg, index=result.daily.index)
+    assert bench.daily.index.equals(result.daily.index)
+    assert np.isfinite(bench.daily["net_return"].to_numpy()).all()
+
+
+def test_benchmark_without_an_index_still_drops_the_unfunded_day(panel: Panel, cfg: Config):
+    bench = buy_and_hold(panel, cfg)
+    assert bench.daily.index[0] == panel.close.index[cfg.backtest.delay]
+
+
+def test_parameter_selection_is_stable_under_summation_order(panel: Panel, cfg: Config):
+    """Selection must not hinge on floating-point noise.
+
+    Summing per-name P&L before or after netting costs changes a daily total by
+    ~1e-17. If the winner is chosen by a bare argmax, that is enough to flip
+    which parameter set is picked whenever two settings are inert on the
+    training window - and the out-of-sample track record changes with it.
+    """
+    from strategies151.backtest.engine import asset_pnl, objective_value, portfolio_pnl
+    from strategies151.strategies.registry import get
+
+    strategy_cls = get("6.5.volatility_targeting")
+    combos = list(strategy_cls.grid())
+    folds = make_folds(len(panel), cfg.backtest.train_days, cfg.backtest.test_days,
+                       warmup=build("6.5.volatility_targeting").warmup)
+    weights = [strategy_cls(**p).weights(panel) for p in combos]
+    fold = folds[0]
+    train_returns = panel.returns.iloc[fold.train_start : fold.train_end]
+
+    def scores(sum_first: bool):
+        out = []
+        for frame in weights:
+            window = frame.iloc[fold.train_start : fold.train_end]
+            if sum_first:
+                out.append(objective_value(
+                    portfolio_pnl(window, train_returns, cfg.backtest.cost_bps, 1),
+                    "sharpe", 252))
+            else:
+                parts = asset_pnl(window, train_returns, cfg.backtest.cost_bps, 1)
+                pnl = pd.DataFrame({"net_return": (parts["gross"] - parts["cost"]).sum(axis=1)})
+                out.append(objective_value(pnl, "sharpe", 252))
+        return np.array([s if np.isfinite(s) else -np.inf for s in out])
+
+    a, b = scores(True), scores(False)
+    assert np.argmax(np.round(a, 9)) == np.argmax(np.round(b, 9))
+
+
+def test_selection_prefers_the_documented_default_on_a_tie():
+    """A tie resolves to the earliest grid entry, which is the paper's default."""
+    scores = np.array([0.5, 0.5 + 1e-15, 0.2])
+    assert int(np.argmax(np.round(scores, 9))) == 0
