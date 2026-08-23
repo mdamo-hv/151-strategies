@@ -17,13 +17,14 @@ LEADERBOARD_COLUMNS = [
     "style",
     "folds",
     "days",
+    # Headline four, as fractions: annualised return, Sharpe, drawdown, Calmar.
     "cagr",
-    "ann_return",
-    "ann_volatility",
     "sharpe",
-    "sortino",
     "max_drawdown",
     "calmar",
+    "ann_return",
+    "ann_volatility",
+    "sortino",
     "hit_rate",
     "ann_turnover",
     "gross_sharpe",
@@ -93,23 +94,51 @@ def write_results(
     return paths
 
 
-def markdown_summary(board: pd.DataFrame, context: dict | None = None) -> str:
-    display = board.copy()
-    percent = ["cagr", "ann_return", "ann_volatility", "max_drawdown", "hit_rate", "cost_drag_ann"]
-    for column in percent:
-        if column in display:
-            display[column] = (display[column] * 100).round(2)
-    for column in ("sharpe", "sortino", "calmar", "ann_turnover", "gross_sharpe",
-                   "avg_gross_exposure", "avg_net_exposure"):
-        if column in display:
-            display[column] = display[column].round(3)
-    for column in ("folds", "days"):
-        if column in display:
-            display[column] = display[column].astype("Int64")
+#: Display name -> (source statistic, formatting). ``pct`` multiplies by 100.
+DISPLAY_COLUMNS: tuple[tuple[str, str, str], ...] = (
+    ("section", "section", "raw"),
+    ("title", "title", "raw"),
+    ("style", "style", "raw"),
+    ("folds", "folds", "int"),
+    ("days", "days", "int"),
+    # The four headline metrics.
+    ("ann_return_%", "cagr", "pct"),
+    ("sharpe", "sharpe", "ratio"),
+    ("max_drawdown_%", "max_drawdown", "pct"),
+    ("calmar", "calmar", "ratio"),
+    # Supporting detail.
+    ("ann_vol_%", "ann_volatility", "pct"),
+    ("hit_rate_%", "hit_rate", "pct"),
+    ("ann_turnover_x", "ann_turnover", "ratio"),
+)
 
-    keep = [c for c in ["section", "title", "style", "folds", "days", "cagr", "ann_volatility",
-                        "sharpe", "max_drawdown", "calmar", "hit_rate", "ann_turnover"]
-            if c in display]
+
+def display_frame(board: pd.DataFrame) -> pd.DataFrame:
+    """Rename and rescale the leaderboard for human consumption.
+
+    ``leaderboard.csv`` keeps every statistic as a raw fraction so downstream
+    analysis does not have to undo formatting; this is the presentation view,
+    with units carried in the column names.
+    """
+    out = pd.DataFrame(index=board.index)
+    for label, source, kind in DISPLAY_COLUMNS:
+        if source not in board.columns:
+            continue
+        column = board[source]
+        if kind == "pct":
+            out[label] = (column.astype(float) * 100).round(2)
+        elif kind == "ratio":
+            out[label] = column.astype(float).round(2)
+        elif kind == "int":
+            out[label] = column.astype(float).round().astype("Int64")
+        else:
+            out[label] = column
+    return out
+
+
+def markdown_summary(board: pd.DataFrame, context: dict | None = None) -> str:
+    display = display_frame(board)
+    keep = list(display.columns)
     lines = ["# 151 Strategies - walk-forward out-of-sample results", ""]
     if context:
         lines += [
@@ -123,9 +152,13 @@ def markdown_summary(board: pd.DataFrame, context: dict | None = None) -> str:
             f"* Transaction cost: {context.get('cost_bps')} bps per unit traded, "
             f"signals executed with delay {context.get('delay')}",
             "",
-            "Percentages are annualised where applicable. Every number below is "
-            "out-of-sample: parameters were chosen on the preceding training "
-            "window only.",
+            "",
+            "`ann_return_%` is the annualised compound return (CAGR), "
+            "`max_drawdown_%` the worst peak-to-trough loss, and "
+            "`calmar` the ratio of the two. `sharpe` is "
+            "`mean/sd * sqrt(252)`, the statistic used in Appendix A of the "
+            "paper. All figures are net of costs and entirely out-of-sample: "
+            "parameters were chosen on the preceding training window only.",
             "",
         ]
     lines.append(display.loc[:, keep].to_markdown(index=False))

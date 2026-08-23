@@ -133,11 +133,12 @@ def cmd_backtest(args, cfg: Config) -> int:
             continue
         results.append(result)
         log.info(
-            "%-42s sharpe %6.2f  cagr %7.2f%%  mdd %7.2f%%  (%.1fs)",
+            "%-42s ann.return %7.2f%%  sharpe %6.2f  max.dd %7.2f%%  calmar %6.2f  (%.1fs)",
             result.key,
-            result.stats.get("sharpe", float("nan")),
             result.stats.get("cagr", float("nan")) * 100,
+            result.stats.get("sharpe", float("nan")),
             result.stats.get("max_drawdown", float("nan")) * 100,
+            result.stats.get("calmar", float("nan")),
             result.elapsed_s,
         )
     if not results:

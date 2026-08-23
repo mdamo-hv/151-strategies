@@ -98,3 +98,59 @@ def test_leaderboard_is_sorted_by_sharpe(panel: Panel, cfg: Config):
     sharpes = board["sharpe"].dropna().tolist()
     assert sharpes == sorted(sharpes, reverse=True)
     assert "# 151 Strategies" in markdown_summary(board)
+
+
+def test_display_frame_leads_with_the_headline_metrics():
+    from strategies151.backtest.report import display_frame
+
+    board = pd.DataFrame(
+        {
+            "section": ["3.1"],
+            "title": ["Price-momentum"],
+            "style": ["momentum"],
+            "folds": [125.0],
+            "days": [2624.0],
+            "cagr": [0.2602],
+            "sharpe": [1.5890],
+            "max_drawdown": [-0.2079],
+            "calmar": [1.2517],
+            "ann_volatility": [0.1530],
+            "hit_rate": [0.5659],
+            "ann_turnover": [3.3051],
+        }
+    )
+    display = display_frame(board)
+    assert list(display.columns)[5:9] == ["ann_return_%", "sharpe", "max_drawdown_%", "calmar"]
+
+
+def test_display_frame_converts_fractions_to_percentages():
+    from strategies151.backtest.report import display_frame
+
+    board = pd.DataFrame(
+        {"cagr": [0.2602], "sharpe": [1.589], "max_drawdown": [-0.2079], "calmar": [1.2517]}
+    )
+    display = display_frame(board)
+    assert display["ann_return_%"].iloc[0] == pytest.approx(26.02)
+    assert display["max_drawdown_%"].iloc[0] == pytest.approx(-20.79)
+    # Ratios stay ratios.
+    assert display["sharpe"].iloc[0] == pytest.approx(1.59)
+    assert display["calmar"].iloc[0] == pytest.approx(1.25)
+
+
+def test_leaderboard_csv_keeps_raw_fractions(panel: Panel, cfg: Config):
+    from strategies151.backtest.report import leaderboard
+
+    result = walk_forward(build("3.4.low_volatility"), panel, cfg)
+    board = leaderboard([result])
+    # Presentation scaling must not leak back into the machine-readable output.
+    assert abs(board["max_drawdown"].iloc[0]) <= 1.0
+    assert list(board.columns)[6:10] == ["cagr", "sharpe", "max_drawdown", "calmar"]
+
+
+def test_markdown_summary_labels_units_in_the_header(panel: Panel, cfg: Config):
+    from strategies151.backtest.report import leaderboard, markdown_summary
+
+    board = leaderboard([walk_forward(build("3.4.low_volatility"), panel, cfg)])
+    text = markdown_summary(board)
+    for column in ("ann_return_%", "sharpe", "max_drawdown_%", "calmar"):
+        assert column in text

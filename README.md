@@ -79,6 +79,24 @@ it**. 125 folds over this universe, covering March 2016 to August 2026.
   the leaderboard compares them over an identical out-of-sample period. Pass
   `--no-align-folds` to let each strategy use every fold its own warmup allows.
 
+### Metrics
+
+Four headline statistics, reported for every strategy and for the benchmark:
+
+| Metric | Definition |
+|---|---|
+| **Annualised return** | Compound growth rate of the out-of-sample equity curve, `prod(1 + r)^(252/n) - 1`, net of costs |
+| **Sharpe ratio** | `mean(r) / sd(r) * sqrt(252)` — the statistic used in Appendix A of the paper |
+| **Max drawdown** | Worst peak-to-trough loss on the equity curve |
+| **Calmar ratio** | Annualised return divided by the absolute max drawdown |
+
+Annualised volatility, hit rate, turnover, Sortino, the gross-vs-net cost
+decomposition and average exposures sit alongside them in
+`results/leaderboard.csv`. That file keeps every statistic as a **raw fraction**
+so downstream analysis does not have to undo formatting; percentage scaling and
+unit-bearing column names (`ann_return_%`, `max_drawdown_%`) are applied only in
+the rendered `summary.md` and terminal output.
+
 ### Guards against look-ahead
 
 `tests/test_strategies.py::test_weights_are_causal` re-runs every strategy on a
@@ -96,39 +114,39 @@ Full artifacts are in [`results/`](results/): `leaderboard.csv`, `summary.md`,
 
 ![Out-of-sample equity curves](results/equity_curves.png)
 
-Out-of-sample, 2016-03-11 to 2026-08-18, 125 folds, 5 bps costs:
+Out-of-sample, 2016-03-11 to 2026-08-18, 125 folds, net of 5 bps costs. **Annualised return** is compound (CAGR), **max drawdown** is the worst peak-to-trough loss, **Calmar** is the ratio of the two, and **Sharpe** is `mean/sd * sqrt(252)` — the statistic used in Appendix A of the paper. Sorted by Sharpe:
 
-| Section | Strategy | CAGR | Vol | **Sharpe** | Max DD | Turnover |
-|---|---|---:|---:|---:|---:|---:|
-| 6.5 | Volatility targeting with risk-free asset | 26.0% | 15.3% | **1.59** | -20.8% | 3.3x |
-| – | *Equal-weighted buy & hold (benchmark)* | *37.5%* | *25.4%* | *1.38* | *-40.0%* | *0.1x* |
-| 4.1 | Momentum rotation | 61.1% | 44.6% | **1.29** | -58.1% | 26.3x |
-| 4.6 | Multi-asset trend following | 38.3% | 30.8% | **1.21** | -47.1% | 23.3x |
-| 4.1.2 | Dual-momentum rotation | 34.3% | 31.1% | **1.10** | -51.3% | 25.4x |
-| 3.1 | Price-momentum (long-only) | 44.1% | 42.2% | **1.08** | -60.3% | 41.5x |
-| 3.11 | Single moving average | 22.7% | 24.6% | 0.96 | -44.4% | 40.9x |
-| 3.15 | Channel (Donchian) | 21.4% | 25.9% | 0.88 | -42.7% | 21.4x |
-| 3.14 | Support and resistance | 14.2% | 25.5% | 0.65 | -53.9% | 211.2x |
-| 10.4 | Trend following (sign/vol weighting) | 10.7% | 18.3% | 0.65 | -36.4% | 35.7x |
-| 3.4 | Low-volatility anomaly | 10.5% | 21.2% | 0.58 | -39.2% | 8.7x |
-| 3.12 | Two moving averages | 4.8% | 21.2% | 0.33 | -37.3% | 13.6x |
-| 3.13 | Three moving averages | 4.5% | 25.8% | 0.30 | -49.6% | 69.4x |
-| 3.1 | Price-momentum (long/short) | 3.6% | 23.6% | 0.27 | -58.5% | 44.5x |
-| 3.17 | Single-stock KNN | 3.3% | 19.6% | 0.27 | -56.5% | 183.0x |
-| 4.3 | R-squared selectivity | 2.5% | 17.2% | 0.23 | -34.4% | 27.9x |
-| 4.1.1 | Momentum rotation with MA filter | 1.2% | 29.6% | 0.19 | -63.5% | 67.4x |
-| 3.7 | Residual momentum | -1.9% | 17.0% | -0.03 | -54.3% | 27.7x |
-| 3.8 | Pairs trading | -2.9% | 14.5% | -0.13 | -39.6% | 62.6x |
-| 4.4 | Mean-reversion (internal bar strength) | -4.8% | 19.4% | -0.16 | -59.8% | 260.8x |
-| 10.3 | Contrarian trading | -5.2% | 18.2% | -0.20 | -61.1% | 110.9x |
-| 3.20 | Alpha combos | -8.3% | 23.6% | -0.25 | -77.1% | 149.3x |
-| 3.9.1 | Mean-reversion (multiple clusters) | -6.9% | 18.9% | -0.28 | -61.6% | 180.4x |
-| 3.6 | Multifactor portfolio (rank blend) | -7.5% | 17.6% | -0.36 | -59.7% | 93.5x |
-| 3.18.1 | Statistical arbitrage (dollar-neutral) | -6.8% | 15.3% | -0.38 | -65.7% | 129.7x |
-| 3.9 | Mean-reversion (single cluster) | -8.9% | 18.4% | -0.42 | -69.9% | 164.2x |
-| 3.10 | Mean-reversion (weighted regression) | -8.5% | 16.5% | -0.46 | -67.8% | 174.7x |
-| 10.3.1 | Contrarian trading with volume filter | -16.5% | 27.5% | -0.52 | -88.3% | 179.6x |
-| 3.18 | Statistical arbitrage (mean-variance) | -9.1% | 14.1% | -0.61 | -71.8% | 122.6x |
+| Section | Strategy | Ann. return | Sharpe | Max drawdown | Calmar | Ann. vol | Turnover |
+|---|---|---:|---:|---:|---:|---:|---:|
+| 6.5 | Volatility targeting with risk-free asset | 26.0% | **1.59** | -20.8% | 1.25 | 15.3% | 3.3x |
+| *–* | *Equal-weighted buy & hold (benchmark)* | *37.5%* | *1.38* | *-40.0%* | *0.94* | *25.4%* | *0.1x* |
+| 4.1 | Momentum rotation | 61.1% | **1.29** | -58.1% | 1.05 | 44.6% | 26.3x |
+| 4.6 | Multi-asset trend following | 38.3% | **1.21** | -47.0% | 0.81 | 30.8% | 23.3x |
+| 4.1.2 | Dual-momentum rotation | 34.3% | **1.10** | -51.3% | 0.67 | 31.1% | 25.4x |
+| 3.1 | Price-momentum (long-only) | 44.1% | **1.07** | -60.3% | 0.73 | 42.1% | 41.5x |
+| 3.11 | Single moving average | 22.7% | 0.95 | -44.4% | 0.51 | 24.6% | 40.9x |
+| 3.15 | Channel (Donchian) | 21.4% | 0.88 | -42.7% | 0.50 | 25.9% | 21.4x |
+| 3.14 | Support and resistance | 14.2% | 0.65 | -53.9% | 0.26 | 25.5% | 211.2x |
+| 10.4 | Trend following (sign/vol weighting) | 10.7% | 0.65 | -36.4% | 0.29 | 18.3% | 35.7x |
+| 3.4 | Low-volatility anomaly | 10.5% | 0.58 | -39.2% | 0.27 | 21.2% | 8.7x |
+| 3.12 | Two moving averages | 4.8% | 0.33 | -37.3% | 0.13 | 21.2% | 13.6x |
+| 3.13 | Three moving averages | 4.5% | 0.30 | -49.6% | 0.09 | 25.8% | 69.4x |
+| 3.1 | Price-momentum (long/short) | 3.6% | 0.27 | -58.5% | 0.06 | 23.6% | 44.5x |
+| 3.17 | Single-stock KNN | 3.3% | 0.27 | -56.5% | 0.06 | 19.6% | 183.0x |
+| 4.3 | R-squared selectivity | 2.5% | 0.23 | -34.4% | 0.07 | 17.2% | 27.9x |
+| 4.1.1 | Momentum rotation with MA filter | 1.2% | 0.19 | -63.4% | 0.02 | 29.6% | 67.4x |
+| 3.7 | Residual momentum (market-residual proxy) | -1.9% | -0.03 | -54.3% | -0.04 | 17.0% | 27.7x |
+| 3.8 | Pairs trading | -2.9% | -0.13 | -39.6% | -0.07 | 14.5% | 62.6x |
+| 4.4 | Mean-reversion (internal bar strength) | -4.8% | -0.15 | -59.7% | -0.08 | 19.4% | 260.8x |
+| 10.3 | Contrarian trading (market-index demeaned) | -5.2% | -0.20 | -61.1% | -0.08 | 18.2% | 110.9x |
+| 3.20 | Alpha combos | -8.3% | -0.25 | -77.1% | -0.11 | 23.6% | 149.3x |
+| 3.9.1 | Mean-reversion (multiple clusters) | -6.9% | -0.28 | -61.6% | -0.11 | 18.9% | 180.4x |
+| 3.6 | Multifactor portfolio (rank blend) | -7.5% | -0.36 | -59.7% | -0.13 | 17.6% | 93.5x |
+| 3.18.1 | Statistical arbitrage (dollar-neutral) | -6.8% | -0.38 | -65.7% | -0.10 | 15.3% | 129.7x |
+| 3.9 | Mean-reversion (single cluster) | -8.9% | -0.42 | -69.9% | -0.13 | 18.4% | 164.2x |
+| 3.10 | Mean-reversion (weighted regression) | -8.5% | -0.46 | -67.8% | -0.12 | 16.4% | 174.7x |
+| 10.3.1 | Contrarian trading with volume filter | -16.4% | -0.52 | -88.3% | -0.19 | 27.5% | 179.6x |
+| 3.18 | Statistical arbitrage (mean-variance optimisation) | -9.1% | -0.60 | -71.8% | -0.13 | 14.1% | 122.6x |
 
 ### Reading these numbers
 
@@ -149,7 +167,7 @@ read as a verdict on the paper.
   positive momentum Sharpe, not independent evidence.
 * **Only 6.5 beats the benchmark on Sharpe**, and it does so by cutting
   volatility rather than adding return — which is what volatility targeting is
-  for. Nothing here beats buy-and-hold on CAGR at comparable risk.
+  for. Nothing here beats buy-and-hold on annualised return at comparable risk.
 * **Turnover is not modelled beyond a linear 5 bps.** The high-turnover
   strategies (3.14 at 211x, 4.4 at 261x) would face market impact and borrow
   costs that this accounting ignores; treat their numbers as upper bounds.
