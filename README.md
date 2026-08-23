@@ -108,9 +108,17 @@ strictly precede their test windows and that test windows never overlap.
 
 ## Results
 
-Full artifacts are in [`results/`](results/): `leaderboard.csv`, `summary.md`,
-`daily_returns.csv`, `equity_curves.csv/.png`, and a per-strategy
-`folds/<key>.csv` recording the parameters chosen on each training window.
+Full artifacts are in [`results/`](results/):
+
+| File | Contents |
+|---|---|
+| `summary.md` | rendered leaderboard plus the per-ticker sections |
+| `leaderboard.csv` | every statistic per strategy, as raw fractions |
+| `ticker_performance.csv` | each ticker's own buy-and-hold record |
+| `ticker_attribution.csv` | per-strategy, per-ticker P&L attribution |
+| `ticker_universe_attribution.csv` | each ticker rolled up across the library |
+| `daily_returns.csv`, `equity_curves.csv/.png` | the out-of-sample track records |
+| `folds/<key>.csv` | parameters chosen on each of the 125 training windows |
 
 ![Out-of-sample equity curves](results/equity_curves.png)
 
@@ -171,6 +179,61 @@ read as a verdict on the paper.
 * **Turnover is not modelled beyond a linear 5 bps.** The high-turnover
   strategies (3.14 at 211x, 4.4 at 261x) would face market impact and borrow
   costs that this accounting ignores; treat their numbers as upper bounds.
+
+
+### Per-ticker results
+
+The six names are traded as **one universe**, not as six separate backtests —
+the cross-sectional strategies rank them against each other, so a per-ticker run
+would not even be defined for those. Results are therefore reported two ways.
+
+**1. How each ticker behaved on its own** (`results/ticker_performance.csv`) —
+buy and hold over the same out-of-sample window, no strategy involved:
+
+| Ticker | Ann. return | Sharpe | Max drawdown | Calmar | Ann. vol |
+|---|---:|---:|---:|---:|---:|
+| NVDA | 72.0% | 1.34 | -66.3% | 1.09 | 49.4% |
+| MSFT | 25.4% | 0.96 | -37.1% | 0.68 | 27.5% |
+| WMT | 19.0% | 0.91 | -25.7% | 0.74 | 21.8% |
+| JPM | 22.4% | 0.88 | -43.6% | 0.51 | 27.1% |
+| AMZN | 23.9% | 0.82 | -56.1% | 0.42 | 32.7% |
+| TSLA | 36.0% | 0.82 | -73.6% | 0.49 | 58.7% |
+
+**2. What each ticker contributed to each strategy**
+(`results/ticker_attribution.csv`, 174 rows = 29 strategies x 6 tickers). The
+engine decomposes P&L per name before aggregating, so a strategy's per-ticker
+contributions sum exactly to its annualised return — the reconciliation is
+checked to machine precision in `tests/test_attribution.py`.
+
+Rolled up across the whole library (`ticker_universe_attribution.csv`):
+
+| Ticker | Mean contribution | Best | Worst | Strategies profitable on it | Avg gross weight | Avg net weight |
+|---|---:|---:|---:|---:|---:|---:|
+| NVDA | +6.91% | +33.53% | -3.40% | 68% | 0.19 | +0.09 |
+| TSLA | +1.86% | +18.69% | -8.64% | 54% | 0.16 | +0.04 |
+| MSFT | +0.26% | +4.07% | -3.70% | 50% | 0.16 | +0.06 |
+| JPM | +0.20% | +3.56% | -4.14% | 57% | 0.15 | +0.05 |
+| AMZN | +0.10% | +5.43% | -7.55% | 54% | 0.15 | +0.04 |
+| WMT | -0.35% | +6.66% | -3.92% | 36% | 0.17 | +0.07 |
+
+For a single strategy, e.g. 4.1 momentum rotation:
+
+| Ticker | Contribution (ann.) | Share of P&L | Avg gross weight | Days held |
+|---|---:|---:|---:|---:|
+| NVDA | +33.53% | 58.3% | 0.42 | 61% |
+| TSLA | +18.69% | 32.5% | 0.22 | 36% |
+| MSFT | +3.40% | 5.9% | 0.12 | 19% |
+| JPM | +1.77% | 3.1% | 0.06 | 11% |
+| AMZN | +0.97% | 1.7% | 0.08 | 15% |
+| WMT | -0.82% | -1.4% | 0.10 | 16% |
+
+NVDA alone produced 58% of that strategy's P&L, and the library as a whole made
+money on NVDA and lost money on WMT — a concentration worth keeping in mind
+before reading any leaderboard row as a property of the strategy rather than of
+the universe.
+
+Add `--per-ticker-daily` to also write each strategy's daily per-ticker
+contributions to `results/by_ticker/` (~300 KB per strategy, off by default).
 
 ---
 
@@ -274,8 +337,8 @@ src/strategies151/
     windows.py            the sliding train/test schedule
     engine.py             tuning, P&L accounting, walk-forward driver
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
-    report.py             leaderboard, markdown summary, equity-curve plot
-tests/                    167 tests, including the causality guard
+    report.py             leaderboard, per-ticker attribution, summary, plots
+tests/                    187 tests, including the causality guard
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an

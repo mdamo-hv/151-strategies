@@ -46,6 +46,83 @@ def leaderboard(results: Sequence[WalkForwardResult]) -> pd.DataFrame:
     return frame.sort_values("sharpe", ascending=False, na_position="last").reset_index(drop=True)
 
 
+def ticker_performance(
+    panel,
+    index: pd.Index | None = None,
+    annualization: int = 252,
+) -> pd.DataFrame:
+    """Each ticker's own buy-and-hold record over the out-of-sample window.
+
+    This is the reference point for the attribution table: it says how a name
+    behaved on its own, independent of any strategy's decision to hold it.
+    """
+    from strategies151.backtest import metrics as m
+
+    returns = panel.returns if index is None else panel.returns.reindex(index)
+    rows = []
+    for ticker in returns.columns:
+        stats = m.summarize(returns[ticker].dropna(), annualization=annualization)
+        rows.append({"ticker": ticker, **stats})
+    frame = pd.DataFrame(rows)
+    return frame.sort_values("sharpe", ascending=False).reset_index(drop=True)
+
+
+def ticker_attribution(
+    results: Sequence[WalkForwardResult],
+    annualization: int = 252,
+) -> pd.DataFrame:
+    """Per-strategy, per-ticker P&L attribution stacked into one table."""
+    frames = [r.ticker_attribution(annualization) for r in results]
+    frames = [f for f in frames if not f.empty]
+    if not frames:
+        return pd.DataFrame()
+    return pd.concat(frames, ignore_index=True)
+
+
+def universe_attribution(attribution: pd.DataFrame) -> pd.DataFrame:
+    """How each ticker contributed across every strategy in the study.
+
+    Averaged, not summed: the strategies are alternatives rather than a
+    portfolio, so the mean contribution answers "which names did the library as
+    a whole make or lose money on".
+    """
+    if attribution.empty:
+        return pd.DataFrame()
+    strategies = attribution[attribution["style"] != "benchmark"] if "style" in attribution else attribution
+    grouped = (
+        strategies.groupby("ticker")
+        .agg(
+            strategies=("key", "nunique"),
+            mean_contribution_ann_pct=("contribution_ann_%", "mean"),
+            best_contribution_ann_pct=("contribution_ann_%", "max"),
+            worst_contribution_ann_pct=("contribution_ann_%", "min"),
+            profitable_strategies_pct=("contribution_ann_%", lambda c: (c > 0).mean() * 100),
+            avg_gross_weight=("avg_gross_weight", "mean"),
+            avg_net_weight=("avg_net_weight", "mean"),
+        )
+        .reset_index()
+    )
+    return grouped.sort_values("mean_contribution_ann_pct", ascending=False).reset_index(drop=True)
+
+
+def format_ticker_performance(performance: pd.DataFrame) -> pd.DataFrame:
+    """Presentation view of :func:`ticker_performance`, units in the headers."""
+    out = pd.DataFrame({"ticker": performance["ticker"]})
+    for label, source in (
+        ("ann_return_%", "cagr"),
+        ("sharpe", "sharpe"),
+        ("max_drawdown_%", "max_drawdown"),
+        ("calmar", "calmar"),
+        ("ann_vol_%", "ann_volatility"),
+        ("hit_rate_%", "hit_rate"),
+    ):
+        if source not in performance.columns:
+            continue
+        values = performance[source].astype(float)
+        out[label] = (values * 100).round(2) if label.endswith("_%") else values.round(2)
+    return out
+
+
 def daily_matrix(results: Sequence[WalkForwardResult]) -> pd.DataFrame:
     """One column of net daily returns per strategy, aligned on date."""
     return pd.DataFrame({res.key: res.net_returns for res in results}).sort_index()
@@ -55,6 +132,8 @@ def write_results(
     results: Sequence[WalkForwardResult],
     output_dir: Path,
     context: dict | None = None,
+    panel=None,
+    per_ticker_daily: bool = False,
 ) -> dict[str, Path]:
     output_dir.mkdir(parents=True, exist_ok=True)
     paths: dict[str, Path] = {}
@@ -62,6 +141,28 @@ def write_results(
     board = leaderboard(results)
     paths["leaderboard"] = output_dir / "leaderboard.csv"
     board.to_csv(paths["leaderboard"], index=False)
+
+    attribution = ticker_attribution(results)
+    if not attribution.empty:
+        paths["ticker_attribution"] = output_dir / "ticker_attribution.csv"
+        attribution.to_csv(paths["ticker_attribution"], index=False)
+        paths["universe_attribution"] = output_dir / "ticker_universe_attribution.csv"
+        universe_attribution(attribution).to_csv(paths["universe_attribution"], index=False)
+
+    if panel is not None:
+        index = results[0].daily.index if results else None
+        paths["ticker_performance"] = output_dir / "ticker_performance.csv"
+        ticker_performance(panel, index=index).to_csv(paths["ticker_performance"], index=False)
+
+    if per_ticker_daily:
+        # ~300 KB per strategy, so this is opt-in rather than always written.
+        daily_dir = output_dir / "by_ticker"
+        daily_dir.mkdir(exist_ok=True)
+        for res in results:
+            contributions = res.ticker_contributions()
+            if not contributions.empty:
+                contributions.to_csv(daily_dir / f"{res.key}.csv")
+        paths["by_ticker"] = daily_dir
 
     returns = daily_matrix(results)
     paths["daily_returns"] = output_dir / "daily_returns.csv"
@@ -90,7 +191,14 @@ def write_results(
         paths["context"].write_text(json.dumps(context, indent=2, default=str))
 
     paths["summary"] = output_dir / "summary.md"
-    paths["summary"].write_text(markdown_summary(board, context))
+    performance = (
+        ticker_performance(panel, index=results[0].daily.index if results else None)
+        if panel is not None
+        else None
+    )
+    paths["summary"].write_text(
+        markdown_summary(board, context, performance=performance, attribution=attribution)
+    )
     return paths
 
 
@@ -136,7 +244,12 @@ def display_frame(board: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def markdown_summary(board: pd.DataFrame, context: dict | None = None) -> str:
+def markdown_summary(
+    board: pd.DataFrame,
+    context: dict | None = None,
+    performance: pd.DataFrame | None = None,
+    attribution: pd.DataFrame | None = None,
+) -> str:
     display = display_frame(board)
     keep = list(display.columns)
     lines = ["# 151 Strategies - walk-forward out-of-sample results", ""]
@@ -163,6 +276,33 @@ def markdown_summary(board: pd.DataFrame, context: dict | None = None) -> str:
         ]
     lines.append(display.loc[:, keep].to_markdown(index=False))
     lines.append("")
+
+    if performance is not None and not performance.empty:
+        lines += [
+            "## How each ticker behaved on its own",
+            "",
+            "Buy and hold, same out-of-sample window, no strategy involved.",
+            "",
+            format_ticker_performance(performance).to_markdown(index=False),
+            "",
+        ]
+
+    if attribution is not None and not attribution.empty:
+        universe = universe_attribution(attribution)
+        if not universe.empty:
+            lines += [
+                "## Which tickers the strategies made money on",
+                "",
+                "Contribution of each ticker to strategy P&L, averaged across "
+                "the strategy library. Contributions are arithmetic and "
+                "additive, so a strategy's per-ticker contributions sum to its "
+                "annualised return.",
+                "",
+                universe.round(2).to_markdown(index=False),
+                "",
+                "Per-strategy detail is in `ticker_attribution.csv`.",
+                "",
+            ]
     return "\n".join(lines)
 
 

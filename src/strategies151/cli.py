@@ -16,6 +16,8 @@ from strategies151.backtest.report import (
     leaderboard,
     markdown_summary,
     plot_equity_curves,
+    ticker_attribution,
+    ticker_performance,
     write_results,
 )
 from strategies151.config import Config
@@ -168,11 +170,25 @@ def cmd_backtest(args, cfg: Config) -> int:
         "oos_end": str(oos_index[-1].date()),
         "aligned_folds": bool(args.align_folds),
     }
-    paths = write_results(results, output_dir, context=context)
+    paths = write_results(
+        results,
+        output_dir,
+        context=context,
+        panel=panel,
+        per_ticker_daily=args.per_ticker_daily,
+    )
     if not args.no_plot:
         plot_equity_curves(results, output_dir / "equity_curves.png")
     board = leaderboard(results)
-    print(markdown_summary(board, context))
+    attribution = ticker_attribution(results)
+    print(
+        markdown_summary(
+            board,
+            context,
+            performance=ticker_performance(panel, index=oos_index),
+            attribution=attribution,
+        )
+    )
     print(f"artifacts written to {output_dir}")
     return 0
 
@@ -216,6 +232,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--cost-bps", type=float)
     p_bt.add_argument("--output")
     p_bt.add_argument("--no-plot", action="store_true")
+    p_bt.add_argument(
+        "--per-ticker-daily",
+        action="store_true",
+        help="also write each strategy's daily per-ticker P&L contributions "
+             "to results/by_ticker/ (roughly 300 KB per strategy)",
+    )
     p_bt.add_argument(
         "--no-align-folds",
         dest="align_folds",

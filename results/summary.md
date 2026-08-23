@@ -11,7 +11,7 @@
 
 | section   | title                                              | style            | folds   |   days |   ann_return_% |   sharpe |   max_drawdown_% |   calmar |   ann_vol_% |   hit_rate_% |   ann_turnover_x |
 |:----------|:---------------------------------------------------|:-----------------|:--------|-------:|---------------:|---------:|-----------------:|---------:|------------:|-------------:|-----------------:|
-| 6.5       | Volatility targeting with risk-free asset          | allocation       | 125     |   2624 |          26.02 |     1.59 |           -20.79 |     1.25 |       15.3  |        56.59 |             3.3  |
+| 6.5       | Volatility targeting with risk-free asset          | allocation       | 125     |   2624 |          26.34 |     1.6  |           -21.85 |     1.21 |       15.4  |        56.59 |             3.3  |
 | -         | Equal-weighted buy & hold                          | benchmark        | <NA>    |   2623 |          37.46 |     1.38 |           -39.99 |     0.94 |       25.41 |        56.58 |             0.1  |
 | 4.1       | Momentum rotation                                  | momentum         | 125     |   2624 |          61.11 |     1.29 |           -58.06 |     1.05 |       44.58 |        55.41 |            26.31 |
 | 4.6       | Multi-asset trend following                        | momentum         | 125     |   2624 |          38.34 |     1.21 |           -47.05 |     0.81 |       30.76 |        55.14 |            23.27 |
@@ -40,3 +40,31 @@
 | 3.10      | Mean-reversion (weighted regression)               | mean-reversion   | 125     |   2624 |          -8.47 |    -0.46 |           -67.8  |    -0.12 |       16.45 |        48.82 |           174.71 |
 | 10.3.1    | Contrarian trading with volume filter              | mean-reversion   | 125     |   2624 |         -16.45 |    -0.52 |           -88.31 |    -0.19 |       27.47 |        47.9  |           179.56 |
 | 3.18      | Statistical arbitrage (mean-variance optimisation) | optimization     | 125     |   2624 |          -9.07 |    -0.6  |           -71.75 |    -0.13 |       14.08 |        48.36 |           122.57 |
+
+## How each ticker behaved on its own
+
+Buy and hold, same out-of-sample window, no strategy involved.
+
+| ticker   |   ann_return_% |   sharpe |   max_drawdown_% |   calmar |   ann_vol_% |   hit_rate_% |
+|:---------|---------------:|---------:|-----------------:|---------:|------------:|-------------:|
+| NVDA     |          72.01 |     1.34 |           -66.34 |     1.09 |       49.37 |        54.5  |
+| MSFT     |          25.38 |     0.96 |           -37.15 |     0.68 |       27.5  |        53.73 |
+| WMT      |          19.02 |     0.91 |           -25.74 |     0.74 |       21.83 |        53.62 |
+| JPM      |          22.37 |     0.88 |           -43.63 |     0.51 |       27.13 |        52.74 |
+| AMZN     |          23.86 |     0.82 |           -56.15 |     0.42 |       32.73 |        53.47 |
+| TSLA     |          36.03 |     0.82 |           -73.63 |     0.49 |       58.66 |        51.75 |
+
+## Which tickers the strategies made money on
+
+Contribution of each ticker to strategy P&L, averaged across the strategy library. Contributions are arithmetic and additive, so a strategy's per-ticker contributions sum to its annualised return.
+
+| ticker   |   strategies |   mean_contribution_ann_pct |   best_contribution_ann_pct |   worst_contribution_ann_pct |   profitable_strategies_pct |   avg_gross_weight |   avg_net_weight |
+|:---------|-------------:|----------------------------:|----------------------------:|-----------------------------:|----------------------------:|-------------------:|-----------------:|
+| NVDA     |           28 |                        6.91 |                       33.53 |                        -3.4  |                       67.86 |               0.19 |             0.09 |
+| TSLA     |           28 |                        1.86 |                       18.69 |                        -8.64 |                       53.57 |               0.16 |             0.04 |
+| MSFT     |           28 |                        0.26 |                        4.07 |                        -3.7  |                       50    |               0.16 |             0.06 |
+| JPM      |           28 |                        0.2  |                        3.56 |                        -4.14 |                       57.14 |               0.15 |             0.05 |
+| AMZN     |           28 |                        0.1  |                        5.43 |                        -7.55 |                       53.57 |               0.15 |             0.04 |
+| WMT      |           28 |                       -0.35 |                        6.66 |                        -3.92 |                       35.71 |               0.17 |             0.07 |
+
+Per-strategy detail is in `ticker_attribution.csv`.

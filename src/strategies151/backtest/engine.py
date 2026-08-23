@@ -22,6 +22,48 @@ log = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # P&L accounting
 # --------------------------------------------------------------------------- #
+def asset_pnl(
+    weights: pd.DataFrame,
+    returns: pd.DataFrame,
+    cost_bps: float = 0.0,
+    delay: int = 1,
+    prev_weights: pd.Series | None = None,
+) -> dict[str, pd.DataFrame]:
+    """Per-asset decomposition of a target-weight schedule's P&L.
+
+    The weight on row ``t`` is applied to the asset return realised on row
+    ``t + delay``; with the default ``delay=1`` a signal computed from the close
+    of day ``t`` is traded into day ``t+1``, so nothing is executed at a price
+    that was used to generate it.  Costs are charged per name on that name's
+    traded notional ``|w_t - w_{t-1}|``.
+
+    Returns frames keyed ``held`` (the weight actually carried into the day),
+    ``gross``, ``cost``, ``net`` and ``turnover``.  Summing any of them across
+    columns gives the corresponding portfolio series, so attribution is exact by
+    construction rather than an after-the-fact approximation.
+    """
+    weights = weights.reindex(columns=returns.columns).fillna(0.0)
+    held = weights.shift(delay)
+    if prev_weights is not None and delay > 0:
+        held.loc[held.index[0]] = prev_weights.reindex(returns.columns).fillna(0.0)
+    held = held.fillna(0.0)
+
+    gross = held * returns.reindex(index=weights.index)
+    previous = held.shift(1)
+    if prev_weights is not None:
+        previous.iloc[0] = prev_weights.reindex(returns.columns).fillna(0.0)
+    previous = previous.fillna(0.0)
+    turnover = (held - previous).abs()
+    cost = turnover * (cost_bps * 1e-4)
+    return {
+        "held": held,
+        "gross": gross,
+        "cost": cost,
+        "net": gross - cost,
+        "turnover": turnover,
+    }
+
+
 def portfolio_pnl(
     weights: pd.DataFrame,
     returns: pd.DataFrame,
@@ -29,36 +71,16 @@ def portfolio_pnl(
     delay: int = 1,
     prev_weights: pd.Series | None = None,
 ) -> pd.DataFrame:
-    """P&L of a target-weight schedule.
-
-    The weight on row ``t`` is applied to the asset return realised on row
-    ``t + delay``; with the default ``delay=1`` a signal computed from the close
-    of day ``t`` is traded into day ``t+1``, so nothing is executed at a price
-    that was used to generate it.  Costs are charged on the traded notional
-    ``sum |w_t - w_{t-1}|``.
-    """
-    weights = weights.reindex(columns=returns.columns).fillna(0.0)
-    aligned = weights.shift(delay)
-    if prev_weights is not None and delay > 0:
-        first = aligned.index[0]
-        aligned.loc[first] = prev_weights.reindex(returns.columns).fillna(0.0)
-    aligned = aligned.fillna(0.0)
-
-    gross = (aligned * returns.reindex(index=weights.index)).sum(axis=1)
-    previous = aligned.shift(1)
-    if prev_weights is not None:
-        previous.iloc[0] = prev_weights.reindex(returns.columns).fillna(0.0)
-    previous = previous.fillna(0.0)
-    turnover = (aligned - previous).abs().sum(axis=1)
-    cost = turnover * (cost_bps * 1e-4)
+    """Portfolio-level P&L: :func:`asset_pnl` summed across the universe."""
+    parts = asset_pnl(weights, returns, cost_bps, delay, prev_weights)
     return pd.DataFrame(
         {
-            "gross_return": gross,
-            "cost": cost,
-            "net_return": gross - cost,
-            "turnover": turnover,
-            "gross_exposure": aligned.abs().sum(axis=1),
-            "net_exposure": aligned.sum(axis=1),
+            "gross_return": parts["gross"].sum(axis=1),
+            "cost": parts["cost"].sum(axis=1),
+            "net_return": parts["net"].sum(axis=1),
+            "turnover": parts["turnover"].sum(axis=1),
+            "gross_exposure": parts["held"].abs().sum(axis=1),
+            "net_exposure": parts["held"].sum(axis=1),
         }
     )
 
@@ -180,6 +202,10 @@ class WalkForwardResult:
     folds: pd.DataFrame  # per-fold diagnostics and chosen parameters
     stats: dict[str, float] = field(default_factory=dict)
     elapsed_s: float = 0.0
+    #: Per-ticker daily decomposition: ``held``, ``gross``, ``cost``, ``net``,
+    #: ``turnover``.  Each frame sums across columns to the matching column of
+    #: :attr:`daily`.
+    per_ticker: dict[str, pd.DataFrame] = field(default_factory=dict)
 
     @property
     def net_returns(self) -> pd.Series:
@@ -187,6 +213,53 @@ class WalkForwardResult:
 
     def equity_curve(self) -> pd.Series:
         return m.equity_curve(self.net_returns)
+
+    def ticker_contributions(self) -> pd.DataFrame:
+        """Daily net P&L contribution of each ticker."""
+        return self.per_ticker.get("net", pd.DataFrame(index=self.daily.index))
+
+    def ticker_attribution(self, annualization: int = 252) -> pd.DataFrame:
+        """One row per ticker: how much of this strategy's P&L it produced.
+
+        Contributions are arithmetic and therefore additive - the
+        ``contribution_ann_%`` column sums to the strategy's annualised
+        arithmetic return, so the attribution is exact rather than indicative.
+        """
+        if not self.per_ticker:
+            return pd.DataFrame()
+        net = self.per_ticker["net"]
+        held = self.per_ticker["held"]
+        gross = self.per_ticker["gross"]
+        cost = self.per_ticker["cost"]
+        turnover = self.per_ticker["turnover"]
+
+        total = float(net.to_numpy().sum())
+        rows = []
+        for ticker in net.columns:
+            contribution = float(net[ticker].sum())
+            days_held = int((held[ticker].abs() > 1e-12).sum())
+            rows.append(
+                {
+                    "ticker": ticker,
+                    "contribution_ann_%": net[ticker].mean() * annualization * 100,
+                    "contribution_total_%": contribution * 100,
+                    "share_of_pnl_%": (contribution / total * 100) if total else float("nan"),
+                    "gross_contribution_ann_%": gross[ticker].mean() * annualization * 100,
+                    "cost_ann_%": cost[ticker].mean() * annualization * 100,
+                    "avg_gross_weight": float(held[ticker].abs().mean()),
+                    "avg_net_weight": float(held[ticker].mean()),
+                    "days_held_%": days_held / len(held) * 100 if len(held) else float("nan"),
+                    "long_days_%": float((held[ticker] > 1e-12).mean() * 100),
+                    "short_days_%": float((held[ticker] < -1e-12).mean() * 100),
+                    "ann_turnover_x": float(turnover[ticker].mean() * annualization),
+                }
+            )
+        frame = pd.DataFrame(rows)
+        frame.insert(0, "style", self.style)
+        frame.insert(0, "key", self.key)
+        frame.insert(0, "title", self.title)
+        frame.insert(0, "section", self.section)
+        return frame.sort_values("contribution_ann_%", ascending=False).reset_index(drop=True)
 
 
 # --------------------------------------------------------------------------- #
@@ -284,8 +357,18 @@ def walk_forward(
     # One extra leading day of returns is needed so the first test-day weight
     # can be traded into the following session under delay=1.
     oos_returns = returns.reindex(oos_weights.index)
-    daily = portfolio_pnl(oos_weights, oos_returns, bt.cost_bps, bt.delay)
-    daily = daily.iloc[bt.delay :]  # drop the unfunded warm-up day
+    parts = asset_pnl(oos_weights, oos_returns, bt.cost_bps, bt.delay)
+    parts = {name: frame.iloc[bt.delay :] for name, frame in parts.items()}
+    daily = pd.DataFrame(
+        {
+            "gross_return": parts["gross"].sum(axis=1),
+            "cost": parts["cost"].sum(axis=1),
+            "net_return": parts["net"].sum(axis=1),
+            "turnover": parts["turnover"].sum(axis=1),
+            "gross_exposure": parts["held"].abs().sum(axis=1),
+            "net_exposure": parts["held"].sum(axis=1),
+        }
+    )  # the leading unfunded warm-up day is dropped above
 
     stats = m.summarize(
         daily["net_return"],
@@ -306,6 +389,7 @@ def walk_forward(
         folds=pd.DataFrame(fold_rows),
         stats=stats,
         elapsed_s=time.perf_counter() - started,
+        per_ticker=parts,
     )
 
 
@@ -334,6 +418,8 @@ def buy_and_hold(panel: Panel, cfg: Config, index: pd.Index | None = None) -> Wa
     returns = panel.returns if index is None else panel.returns.reindex(index)
     n = returns.shape[1]
     weights = pd.DataFrame(1.0 / n, index=returns.index, columns=returns.columns)
+    parts = asset_pnl(weights, returns, cfg.backtest.cost_bps, cfg.backtest.delay)
+    parts = {name: frame.iloc[cfg.backtest.delay :] for name, frame in parts.items()}
     daily = portfolio_pnl(weights, returns, cfg.backtest.cost_bps, cfg.backtest.delay)
     daily = daily.iloc[cfg.backtest.delay :]
     stats = m.summarize(
@@ -350,4 +436,5 @@ def buy_and_hold(panel: Panel, cfg: Config, index: pd.Index | None = None) -> Wa
         daily=daily,
         folds=pd.DataFrame(),
         stats=stats,
+        per_ticker=parts,
     )
