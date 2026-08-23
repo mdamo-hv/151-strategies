@@ -31,4 +31,7 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 filterwarnings = ["ignore::DeprecationWarning"]
-markers = ["integration: needs a reachable QuestDB instance"]
+markers = [
+    "integration: needs a reachable QuestDB instance",
+    "slow: Monte-Carlo calibration checks (seconds, not milliseconds)",
+]

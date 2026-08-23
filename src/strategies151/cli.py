@@ -13,14 +13,16 @@ from pathlib import Path
 import pandas as pd
 
 from strategies151 import catalog
-from strategies151.backtest.charts import summary_chart, ticker_chart
+from strategies151.backtest.charts import significance_chart, summary_chart, ticker_chart
 from strategies151.backtest.engine import buy_and_hold, common_folds, walk_forward
 from strategies151.backtest.perticker import (
     ACTIVE,
     run_ticker_study,
+    significance_frame,
     studies_frame,
     winners_frame,
 )
+from strategies151.backtest import significance as sig
 from strategies151.backtest.report import (
     leaderboard,
     markdown_summary,
@@ -227,7 +229,10 @@ def cmd_per_ticker(args, cfg: Config) -> int:
 
     studies = []
     for ticker in panel.tickers:
-        study = run_ticker_study(ticker, panel, cfg, strategy_keys=args.strategies)
+        study = run_ticker_study(
+            ticker, panel, cfg, strategy_keys=args.strategies,
+            bootstrap_draws=args.bootstrap_draws, bootstrap_block=args.bootstrap_block,
+        )
         studies.append(study)
         if study.best is None:
             log.info("%-6s no applicable strategy on a one-name universe", ticker)
@@ -241,10 +246,24 @@ def cmd_per_ticker(args, cfg: Config) -> int:
                 study.best_stats.get("max_drawdown", float("nan")) * 100,
                 study.best_stats.get("calmar", float("nan")),
             )
+        if study.significance:
+            log.info(
+                "       vs buy&hold %+6.2f%%/yr  p=%.3f | selection-corrected SPA p=%.3f | %s",
+                study.significance["excess_ann_return"] * 100,
+                study.significance["p_vs_buy_hold"],
+                study.significance["spa_p"],
+                study.verdict,
+            )
         chart = ticker_chart(study, output_dir / f"{ticker}.png")
         study.table.assign(params=study.table["params"].apply(json.dumps, default=str)).to_csv(
             output_dir / f"{ticker}_strategies.csv", index=False
         )
+        if not study.candidate_returns.empty:
+            # Persisted so `s151 significance` can re-run the tests - with more
+            # bootstrap draws, or a different block length - without a backtest.
+            series = study.candidate_returns.copy()
+            series["__benchmark__"] = study.benchmark.net_returns
+            series.to_csv(output_dir / f"{ticker}_daily_returns.csv")
         log.info("  chart: %s", chart)
 
     winners = winners_frame(studies)
@@ -260,8 +279,21 @@ def cmd_per_ticker(args, cfg: Config) -> int:
             "Bars are the winning strategy's Sharpe; the marker is that ticker's own buy & hold."
         ),
     )
-    (output_dir / "summary.md").write_text(_per_ticker_markdown(studies, winners, cfg, panel))
-    (output_dir / "index.html").write_text(_per_ticker_html(studies, stamp))
+    tests = significance_frame(studies)
+    if not tests.empty:
+        tests.to_csv(output_dir / "significance.csv", index=False)
+        significance_chart(
+            tests, output_dir / "significance.png",
+            subtitle=(
+                "Winning strategy minus that ticker's own buy & hold. The p-value is "
+                "Hansen's SPA:\nthe chance of a maximum this large arising from "
+                f"{studies[0].applicable} candidates when none has an edge."
+            ),
+        )
+    (output_dir / "summary.md").write_text(
+        _per_ticker_markdown(studies, winners, cfg, panel, tests)
+    )
+    (output_dir / "index.html").write_text(_per_ticker_html(studies, stamp, not tests.empty))
 
     _print(
         winners.assign(
@@ -276,7 +308,8 @@ def cmd_per_ticker(args, cfg: Config) -> int:
     return 0
 
 
-def _per_ticker_markdown(studies, winners: pd.DataFrame, cfg: Config, panel) -> str:
+def _per_ticker_markdown(studies, winners: pd.DataFrame, cfg: Config, panel,
+                         tests: pd.DataFrame | None = None) -> str:
     lines = [
         "# Best strategy per ticker",
         "",
@@ -309,6 +342,9 @@ def _per_ticker_markdown(studies, winners: pd.DataFrame, cfg: Config, panel) -> 
     )
     lines += [display.to_markdown(index=False), ""]
 
+    if tests is not None and not tests.empty:
+        lines += _significance_markdown(tests).splitlines()
+
     for study in studies:
         lines += [f"## {study.ticker}", ""]
         if study.best is None:
@@ -330,7 +366,7 @@ def _per_ticker_markdown(studies, winners: pd.DataFrame, cfg: Config, panel) -> 
     return "\n".join(lines)
 
 
-def _per_ticker_html(studies, stamp: str) -> str:
+def _per_ticker_html(studies, stamp: str, has_significance: bool = False) -> str:
     cards = "\n".join(
         f'  <section><h2>{s.ticker}'
         + (f' <small>{s.best.section} {s.best.title}</small>' if s.best else ' <small>no applicable strategy</small>')
@@ -355,9 +391,119 @@ def _per_ticker_html(studies, stamp: str) -> str:
 <p class="sub">Walk-forward study generated {stamp}. Full tables in
 <code>best_per_ticker.csv</code> and <code>all_results.csv</code>.</p>
 <section><h2>Summary</h2><img src="summary.png" alt="summary chart"></section>
+{'<section><h2>Statistical significance</h2><img src="significance.png" alt="significance chart"></section>' if has_significance else ''}
 {cards}
 </body></html>
 """
+
+SIGNIFICANCE_HEADING = "## Is it statistically relevant, or luck?"
+
+
+def _significance_markdown(tests: pd.DataFrame) -> str:
+    """The significance section, shared by `per-ticker` and `significance`."""
+    view = tests.copy()
+    view["excess_ann_return_%"] = (view["excess_ann_return"] * 100).round(2)
+    for column in ("t_stat_vs_zero", "t_stat_vs_buy_hold"):
+        view[column] = view[column].round(2)
+    for column in ("p_vs_zero", "p_vs_buy_hold", "reality_check_p", "spa_p",
+                   "deflated_sharpe_prob"):
+        view[column] = view[column].round(3)
+    keep = ["ticker", "best_strategy", "excess_ann_return_%", "t_stat_vs_buy_hold",
+            "p_vs_buy_hold", "reality_check_p", "spa_p", "deflated_sharpe_prob", "verdict"]
+    return "\n".join([
+        SIGNIFICANCE_HEADING,
+        "",
+        "Three different questions, in increasing order of how much they ask:",
+        "",
+        "* `p_vs_buy_hold` - a one-sided Newey-West t-test that the strategy's daily "
+        "return exceeds that ticker's own buy & hold. Autocorrelation-robust, but it "
+        "takes the winner as given. A value near 1 does not mean "
+        "\"no difference\" - it means the difference runs the other way.",
+        "* `reality_check_p` / `spa_p` - White's Reality Check and Hansen's SPA, which "
+        "bootstrap all applicable candidates jointly (stationary bootstrap, so serial "
+        "dependence survives resampling) and ask how often chance alone produces a "
+        "maximum this large. **This is the test that accounts for the winner having "
+        "been selected as the best of many.**",
+        "* `deflated_sharpe_prob` - the probability the winner's Sharpe survives "
+        "deflation for the number of trials, their dispersion, and the return "
+        "distribution's skew and kurtosis.",
+        "",
+        view.loc[:, keep].to_markdown(index=False),
+        "",
+        "![significance](significance.png)",
+        "",
+    ])
+
+
+def _splice_significance(path: Path, block: str) -> None:
+    """Replace the significance section of an existing summary.md in place."""
+    if not path.exists():
+        return
+    text = path.read_text()
+    if SIGNIFICANCE_HEADING not in text:
+        path.write_text(text.rstrip() + "\n\n" + block)
+        return
+    start = text.index(SIGNIFICANCE_HEADING)
+    rest = text.find("\n## ", start + len(SIGNIFICANCE_HEADING))
+    end = len(text) if rest == -1 else rest + 1
+    path.write_text(text[:start] + block.rstrip() + "\n\n" + text[end:])
+
+
+def cmd_significance(args, cfg: Config) -> int:
+    """Re-run the significance tests from a saved per-ticker folder."""
+    folder = Path(args.folder)
+    files = sorted(folder.glob("*_daily_returns.csv"))
+    if not files:
+        print(f"no *_daily_returns.csv in {folder}; run `s151 per-ticker` first", file=sys.stderr)
+        return 2
+    winners = pd.read_csv(folder / "best_per_ticker.csv").set_index("ticker")
+
+    rows = []
+    for path in files:
+        ticker = path.name.removesuffix("_daily_returns.csv")
+        frame = pd.read_csv(path, index_col=0, parse_dates=True)
+        benchmark = frame.pop("__benchmark__")
+        if ticker not in winners.index or frame.empty:
+            continue
+        best_key = winners.loc[ticker, "key"]
+        if best_key not in frame.columns:
+            continue
+        rows.append(
+            sig.assess(
+                ticker=ticker,
+                best_name=best_key,
+                best_returns=frame[best_key],
+                benchmark_returns=benchmark,
+                candidate_returns=frame,
+                annualization=cfg.backtest.annualization,
+                draws=args.draws,
+                block=args.block,
+                seed=args.seed,
+            )
+        )
+    if not rows:
+        print("no ticker had both a winner and a saved return series", file=sys.stderr)
+        return 1
+
+    tests = pd.DataFrame(rows)
+    tests["verdict"] = [sig.verdict(r) for r in rows]
+    tests.to_csv(folder / "significance.csv", index=False)
+    significance_chart(
+        tests, folder / "significance.png",
+        subtitle=(
+            "Winning strategy minus that ticker's own buy & hold. The p-value is "
+            f"Hansen's SPA:\nthe chance of a maximum this large arising from "
+            f"{int(tests['n_candidates'].iloc[0])} candidates when none has an edge."
+        ),
+    )
+    _splice_significance(folder / "summary.md", _significance_markdown(tests))
+    display = tests.copy()
+    display["excess_%"] = (display["excess_ann_return"] * 100).round(2)
+    _print(display.loc[:, ["ticker", "best_strategy", "excess_%", "t_stat_vs_buy_hold",
+                           "p_vs_buy_hold", "reality_check_p", "spa_p",
+                           "deflated_sharpe_prob", "verdict"]].round(3))
+    print(f"\nwritten to {folder}")
+    return 0
 
 # --------------------------------------------------------------------- parser --
 def build_parser() -> argparse.ArgumentParser:
@@ -424,7 +570,20 @@ def build_parser() -> argparse.ArgumentParser:
     p_pt.add_argument("--cost-bps", type=float)
     p_pt.add_argument("--output", help="root directory (default: data/)")
     p_pt.add_argument("--stamp", help="folder name (default: YYYYMMDDHHMM)")
+    p_pt.add_argument("--bootstrap-draws", type=int, default=5000)
+    p_pt.add_argument("--bootstrap-block", type=float, default=10.0)
     p_pt.set_defaults(func=cmd_per_ticker)
+
+    p_sig = sub.add_parser(
+        "significance",
+        help="re-run the significance tests on a saved per-ticker folder",
+    )
+    p_sig.add_argument("folder", help="a data/YYYYMMDDHHMM directory")
+    p_sig.add_argument("--draws", type=int, default=5000, help="bootstrap resamples")
+    p_sig.add_argument("--block", type=float, default=10.0,
+                       help="expected stationary-bootstrap block length, in days")
+    p_sig.add_argument("--seed", type=int, default=20260823)
+    p_sig.set_defaults(func=cmd_significance)
     return parser
 
 

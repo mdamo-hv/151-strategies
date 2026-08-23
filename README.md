@@ -31,6 +31,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
 ./.venv/bin/s151 backtest                   # the study
 ./.venv/bin/s151 backtest --strategies 3.1.price_momentum 3.9.mean_reversion_single_cluster
 ./.venv/bin/s151 per-ticker                 # best strategy for each name -> data/
+./.venv/bin/s151 significance data/<stamp>  # is that winner real, or luck?
 ```
 
 Everything is configured in [`configs/default.yaml`](configs/default.yaml);
@@ -248,18 +249,21 @@ s151 per-ticker --tickers NVDA JPM    # a subset
 ```
 
 ```
-data/202608231534/
+data/202608231618/
   summary.png            best strategy per ticker, one bar each
   summary.md             the same as text, with per-ticker sections
   index.html             browsable page embedding every chart
   best_per_ticker.csv    winner, parameters and margin over buy & hold
   all_results.csv        every (ticker, strategy) pair with its statistics
+  significance.png       is the edge real, or the best of many tries?
+  significance.csv       Newey-West, Reality Check, SPA and Deflated Sharpe
   NVDA.png               research card - price, position, equity, ranking, parameters
   NVDA_strategies.csv    every strategy ranked for that ticker
+  NVDA_daily_returns.csv per-strategy daily P&L, so the tests can be re-run
   ...
 ```
 
-![Best strategy per ticker](data/202608231534/summary.png)
+![Best strategy per ticker](data/202608231618/summary.png)
 
 ### Not every strategy can be tested on one name
 
@@ -301,7 +305,7 @@ Each ticker's card shows the price series with the winning strategy's long and
 short periods shaded, its equity curve against buy & hold, the full ranking, and
 the parameters:
 
-![NVDA](data/202608231534/NVDA.png)
+![NVDA](data/202608231618/NVDA.png)
 
 ### Read the "Edge" column before anything else
 
@@ -316,6 +320,65 @@ that on a single mega-cap over this period, **none of the paper's single-name
 strategies reliably beat holding the stock**. What 6.5 and 4.1.2 do deliver is
 materially smaller drawdowns (NVDA -41.8% against -66.3%, AMZN -35.3% against
 -56.2%) at a comparable Sharpe - risk reduction, not alpha.
+
+
+## Is it statistically relevant, or luck?
+
+The winner on each ticker was picked as the **maximum Sharpe out of 11
+candidates**. That selection is itself a hypothesis test run 11 times, so the
+winner's margin is biased upward even if no strategy has an edge — which makes
+a plain t-test on the winner meaningless. `s151 significance` answers three
+separate questions:
+
+| Question | Test |
+|---|---|
+| Is the return series distinguishable from zero? | One-sided **Newey-West** t-test on the mean daily return — autocorrelation-robust, since daily P&L is not i.i.d. |
+| Does it beat holding the stock? | The same test on the **difference** series. Beating zero is easy in a bull market. |
+| Does it survive being chosen as the best of N? | **White's Reality Check** and **Hansen's SPA**, bootstrapping all 11 candidates jointly with the **stationary bootstrap** of Politis & Romano so serial dependence survives resampling; plus the **Deflated Sharpe Ratio** of Bailey & López de Prado. |
+
+![Is the edge real](data/202608231618/significance.png)
+
+| Ticker | Excess ann. return | t-stat | p vs buy & hold | Reality Check p | SPA p | Deflated Sharpe | Verdict |
+|---|---:|---:|---:|---:|---:|---:|---|
+| **MSFT** | -10.3% | -2.88 | 1.00 | 1.00 | **0.61** | 0.70 | lower return than buy & hold (significant) |
+| **WMT** | -2.3% | -1.05 | 0.85 | 0.99 | **0.69** | 0.88 | profitable, but no better than buy & hold |
+| **NVDA** | -10.6% | -1.35 | 0.91 | 0.99 | **0.70** | 0.97 | profitable, but no better than buy & hold |
+| **JPM** | -7.0% | -1.53 | 0.94 | 1.00 | **0.75** | 0.66 | profitable, but no better than buy & hold |
+| **AMZN** | -13.2% | -2.61 | 1.00 | 1.00 | **0.80** | 0.68 | lower return than buy & hold (significant) |
+| **TSLA** | -35.7% | -2.63 | 1.00 | 0.99 | **0.87** | 0.82 | lower return than buy & hold (significant) |
+
+### The answer is no, on every ticker
+
+**Not one strategy survives the selection correction.** SPA p-values run 0.61 to
+0.87 — the observed maximum is exactly what 11 candidates produce by chance when
+none of them has an edge. Reality Check p-values are 0.98–1.00, and the Deflated
+Sharpe probabilities (0.66–0.97) sit below the ~0.95 you would want before
+believing a Sharpe that was chosen rather than pre-registered.
+
+Two details worth reading carefully:
+
+* **`p_vs_buy_hold` near 1 is not a tie.** It is a one-sided test for
+  outperformance, so a value of 0.996 means the difference runs decisively the
+  other way. On AMZN, MSFT and TSLA the winner's return is *significantly lower*
+  than buy & hold (t = -2.6 to -2.9).
+* **Sharpe and return disagree, and that is the real result.** The Sharpe "edge"
+  was ~0 while excess return is -2% to -36% a year, because these strategies cut
+  volatility roughly in proportion to return. That is a risk-reduction trade,
+  not alpha — and the significance tests confirm there is no alpha to find here.
+
+The tests are validated against synthetic data in `tests/test_significance.py`:
+under a simulated null the Reality Check rejects ~6% of the time at α=0.05, under
+a planted edge it rejects ~92%, and SPA overtakes it (98% vs 80%) exactly where
+theory says it should — when most candidates are hopeless.
+
+```bash
+s151 significance data/202608231618                      # re-run from saved series
+s151 significance data/202608231618 --draws 20000 --block 20
+```
+
+Per-strategy daily return series are saved as `<TICKER>_daily_returns.csv`, so
+the tests can be re-run with more draws or a different block length without
+touching the backtest.
 
 ---
 
@@ -419,10 +482,11 @@ src/strategies151/
     windows.py            the sliding train/test schedule
     engine.py             tuning, P&L accounting, walk-forward driver
     perticker.py          per-name study: applicability screening + ranking
+    significance.py       Newey-West, Reality Check, SPA, Deflated Sharpe
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
     charts.py             research cards and the per-ticker summary chart
-tests/                    250 tests: causality, attribution, applicability
+tests/                    275 tests: causality, attribution, test calibration
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an
