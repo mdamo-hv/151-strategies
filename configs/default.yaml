@@ -1,0 +1,43 @@
+# Default research configuration for the 151-strategies walk-forward study.
+
+questdb:
+  host: localhost
+  http_port: 9000          # REST /exec and /imp endpoints
+  pg_port: 8812            # Postgres wire protocol
+  user: admin
+  password: quest
+  database: qdb
+  table: "stooq.daily"     # <schema>.<table> style name, quoted in SQL
+
+universe:
+  tickers: [NVDA, TSLA, MSFT, AMZN, WMT, JPM]
+  start: "2012-01-01"
+  end: null                # null -> latest bar available in the table
+
+data:
+  # Stooq is the canonical source. `stooq` hits stooq.com's CSV endpoint, which
+  # rejects most datacenter IPs; `yahoo` produces the identical stooq schema
+  # (split/dividend adjusted OHLCV) and is used as the fallback.
+  source: auto             # auto | stooq | yahoo
+  history_years: 15
+
+backtest:
+  train_days: 252          # ~1 year of trading days used for fitting/tuning
+  test_days: 21            # ~1 month held out, walked forward one step at a time
+  step_days: 21            # slide the window by one test block
+  min_train_days: 200      # skip a fold if the training slice is shorter than this
+  cost_bps: 5.0            # one-way transaction cost on traded notional, in bps
+  investment_level: 1.0    # gross exposure: sum |w_i| == investment_level
+  annualization: 252
+  delay: 1                 # signals from close of day t are traded into day t+1
+
+selection:
+  # Hyper-parameters are tuned in-sample on each training window; the winner is
+  # frozen and applied to the following (strictly out-of-sample) test window.
+  objective: sharpe        # sharpe | calmar | mean_return
+  # Sample size guard: with few folds a grid can overfit even in-sample, so an
+  # optional shrink toward the strategy default is available.
+  fallback_to_default: true
+
+output:
+  dir: results

@@ -1,0 +1,19 @@
+# Local QuestDB for development. The repo talks to it over
+# http://localhost:9000 (REST) and localhost:8812 (Postgres wire).
+services:
+  questdb:
+    image: questdb/questdb:8.2.1
+    container_name: questdb
+    restart: unless-stopped
+    ports:
+      - "9000:9000"   # REST API and web console
+      - "8812:8812"   # Postgres wire protocol
+      - "9009:9009"   # InfluxDB line protocol
+    environment:
+      QDB_PG_USER: admin
+      QDB_PG_PASSWORD: quest
+    volumes:
+      - questdb-data:/var/lib/questdb
+
+volumes:
+  questdb-data:
