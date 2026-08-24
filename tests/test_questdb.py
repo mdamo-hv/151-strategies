@@ -81,3 +81,53 @@ def test_coverage_reports_ranges(client):
     coverage = client.coverage()
     assert set(coverage.columns) == {"ticker", "bars", "first_bar", "last_bar"}
     assert len(coverage) >= 2
+
+
+def test_insert_negotiates_a_timestamp_format(client):
+    """The client must not depend on one QuestDB dialect.
+
+    `SSSUUU` is a recent pattern token; an older build fails to parse it, does
+    not recognise the column as a timestamp, and rejects every batch with
+    `not a timestamp 'date'`. The plain date is tried first and remembered.
+    """
+    bars = pd.DataFrame(
+        {"ticker": ["FMT"], "date": pd.to_datetime(["2024-03-01"]),
+         "open": [1.0], "high": [2.0], "low": [0.5], "close": [1.5], "volume": [10.0]}
+    )
+    client._timestamp_format = None
+    client.insert_bars(bars)
+    assert client._timestamp_format == ("%Y-%m-%d", "yyyy-MM-dd")
+
+
+def test_negotiated_format_round_trips_the_instant(client):
+    dates = pd.to_datetime(["2012-01-03", "2026-08-21"])
+    bars = pd.DataFrame(
+        {"ticker": ["RT", "RT"], "date": dates, "open": [1.0, 2.0], "high": [2.0, 3.0],
+         "low": [0.5, 1.5], "close": [1.5, 2.5], "volume": [10.0, 20.0]}
+    )
+    client.insert_bars(bars)
+    assert list(client.read_bars(["RT"])["date"]) == list(dates)
+
+
+def test_verify_schema_rejects_a_wrongly_typed_table(client):
+    from strategies151.data.questdb import QuestDBError
+
+    table = "stooq.wrongtype_pytest"
+    client.exec(f"DROP TABLE IF EXISTS '{table}'")
+    client.exec(f"CREATE TABLE '{table}' (ticker SYMBOL, date STRING, close DOUBLE)")
+    from dataclasses import replace as dc_replace
+
+    other = QuestDBClient(dc_replace(client.cfg, table=table))
+    try:
+        with pytest.raises(QuestDBError, match="not TIMESTAMP"):
+            other.verify_schema()
+    finally:
+        client.exec(f"DROP TABLE IF EXISTS '{table}'")
+
+
+def test_verify_schema_accepts_the_real_table(client):
+    client.verify_schema()
+
+
+def test_build_version_is_readable(client):
+    assert "QuestDB" in client.build_version()

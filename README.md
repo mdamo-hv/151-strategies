@@ -593,6 +593,31 @@ redone with more bootstrap draws or a different block length in seconds:
 ./.venv/bin/s151 significance data_sp500/<stamp> --draws 20000 --block 20
 ```
 
+### If every ticker fails with `not a timestamp 'date'`
+
+```
+[1/503] MMM failed: /imp rejected the batch: {'status': "not a timestamp 'date'"}
+```
+
+QuestDB did not recognise the `date` column as a timestamp. Two causes:
+
+1. **An older QuestDB build.** The microsecond pattern token `SSSUUU` is a
+   recent addition; an older server fails to parse it, treats the column as
+   text, and rejects every batch. The client now negotiates the format,
+   starting with the plain `yyyy-MM-dd` that every version accepts, and
+   remembers the one that worked. Update with `git pull` if you see this.
+2. **A pre-existing table with the wrong types.** `/imp` uses the *existing*
+   table's column types and ignores the schema it is handed, so a `stooq.daily`
+   created earlier by another tool rejects everything regardless. `s151 load`
+   now checks this up front and tells you how to fix it:
+
+   ```bash
+   curl -G http://localhost:9000/exec --data-urlencode "query=DROP TABLE 'stooq.daily'"
+   ./.venv/bin/s151 load --sp500
+   ```
+
+`s151 load` logs the server build on startup, so the version is in your log.
+
 ### If a documented flag is "unrecognized"
 
 ```

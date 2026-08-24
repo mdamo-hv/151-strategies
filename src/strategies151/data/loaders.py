@@ -284,6 +284,8 @@ def load_universe(
     other 499.
     """
     client.create_table()
+    client.verify_schema()
+    log.info("QuestDB: %s", client.build_version())
     existing: set[str] = set()
     if skip_existing:
         coverage = client.coverage()
