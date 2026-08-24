@@ -38,6 +38,10 @@ class UniverseConfig:
     tickers: Sequence[str] = ("NVDA", "TSLA", "MSFT", "AMZN", "WMT", "JPM")
     start: str | None = "2015-01-01"
     end: str | None = None
+    #: Minimum share of the window a ticker must cover to enter the panel.
+    #: Strategies need a rectangular cross-section, so a late listing would
+    #: otherwise truncate the history of every other name.
+    min_coverage: float = 0.99
 
 
 @dataclass(frozen=True)

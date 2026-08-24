@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from dataclasses import dataclass
 from typing import Sequence
 
@@ -10,6 +11,8 @@ import pandas as pd
 
 from strategies151.config import Config
 from strategies151.data.questdb import QuestDBClient
+
+log = logging.getLogger(__name__)
 
 FIELDS = ("open", "high", "low", "close", "volume")
 
@@ -101,12 +104,66 @@ class Panel:
         return self.loc(index)
 
 
-def load_panel(cfg: Config, client: QuestDBClient | None = None) -> Panel:
+def select_full_history(
+    frame: pd.DataFrame,
+    min_coverage: float = 0.99,
+) -> tuple[list[str], pd.DataFrame]:
+    """Keep the tickers that span the window; report the ones that do not.
+
+    The strategies need a rectangular universe, and :meth:`Panel.dropna_rows`
+    enforces that by discarding any date on which a single name is missing.  On
+    a six-name universe that is harmless.  On five hundred it is fatal: one 2021
+    listing would truncate a decade of history for everyone.  Selecting on
+    coverage first keeps the long history and drops the late arrivals instead.
+
+    Note the cost: this excludes companies that listed mid-window, which is a
+    second survivorship filter on top of using today's index membership.
+    """
+    counts = frame.groupby("ticker")["date"].count()
+    dates = frame["date"].nunique()
+    threshold = min_coverage * dates
+    keep = sorted(counts[counts >= threshold].index)
+    dropped = (
+        counts[counts < threshold]
+        .rename("bars")
+        .reset_index()
+        .assign(
+            coverage=lambda f: (f["bars"] / dates).round(3),
+            first_bar=lambda f: f["ticker"].map(frame.groupby("ticker")["date"].min()),
+        )
+        .sort_values("coverage")
+    )
+    return keep, dropped
+
+
+def load_panel(
+    cfg: Config,
+    client: QuestDBClient | None = None,
+    tickers: Sequence[str] | None = None,
+    min_coverage: float | None = None,
+) -> Panel:
     client = client or QuestDBClient(cfg.questdb)
-    frame = client.read_bars(cfg.universe.tickers, cfg.universe.start, cfg.universe.end)
+    wanted = list(tickers) if tickers is not None else list(cfg.universe.tickers)
+    frame = client.read_bars(wanted, cfg.universe.start, cfg.universe.end)
     if frame.empty:
         raise RuntimeError(
-            f"no rows in {cfg.questdb.table} for {list(cfg.universe.tickers)}; "
+            f"no rows in {cfg.questdb.table} for {len(wanted)} requested tickers; "
             "run `s151 load` first"
         )
-    return Panel.from_long(frame, cfg.universe.tickers)
+    coverage = cfg.universe.min_coverage if min_coverage is None else min_coverage
+    if coverage and coverage > 0 and len(wanted) > 1:
+        keep, dropped = select_full_history(frame, coverage)
+        if not dropped.empty:
+            log.info(
+                "dropping %d of %d tickers below %.0f%% coverage of the window "
+                "(shortest: %s)",
+                len(dropped), frame["ticker"].nunique(), coverage * 100,
+                ", ".join(dropped["ticker"].head(5)),
+            )
+        if not keep:
+            raise RuntimeError(
+                f"no ticker covers at least {coverage:.0%} of the requested window"
+            )
+        frame = frame[frame["ticker"].isin(keep)]
+        wanted = [t for t in wanted if t in set(keep)]
+    return Panel.from_long(frame, wanted)

@@ -35,6 +35,7 @@ from strategies151.config import REPO_ROOT, Config
 from strategies151.data.loaders import load_universe
 from strategies151.data.panel import load_panel
 from strategies151.data.questdb import QuestDBClient
+from strategies151.data.universe import sp500_constituents
 from strategies151.strategies.registry import implemented_keys, resolve
 
 log = logging.getLogger("strategies151")
@@ -47,18 +48,71 @@ def _print(frame: pd.DataFrame) -> None:
     print(frame.to_string(index=False))
 
 
+
+def _sp500_tickers() -> list[str]:
+    """The membership saved by `s151 load --sp500`."""
+    path = REPO_ROOT / "configs" / "sp500.csv"
+    if not path.exists():
+        raise SystemExit(f"{path} not found; run `s151 load --sp500` first")
+    return [str(t) for t in pd.read_csv(path)["ticker"]]
+
+def _stratified_sample(tickers: list[str], size: int) -> list[str]:
+    """A sector-spread sample of the universe.
+
+    Running the per-ticker study on all 500 names would take about a day - the
+    cost is per name and does not fall with universe size. Sampling across GICS
+    sectors gives a representative spread of verdicts instead of an arbitrary
+    alphabetical prefix.
+    """
+    path = REPO_ROOT / "configs" / "sp500.csv"
+    wanted = list(dict.fromkeys(tickers))
+    if not path.exists():
+        return wanted[:size]
+    meta = pd.read_csv(path)
+    meta = meta[meta["ticker"].isin(wanted)]
+    if meta.empty:
+        return wanted[:size]
+    chosen: list[str] = []
+    groups = {sector: list(frame["ticker"]) for sector, frame in meta.groupby("sector")}
+    round_index = 0
+    while len(chosen) < size and any(len(v) > round_index for v in groups.values()):
+        for sector in sorted(groups):
+            if len(chosen) >= size:
+                break
+            names = groups[sector]
+            if len(names) > round_index:
+                chosen.append(names[round_index])
+        round_index += 1
+    return chosen[:size]
+
 # ------------------------------------------------------------------ commands --
 def cmd_load(args, cfg: Config) -> int:
     client = QuestDBClient(cfg.questdb)
     if not client.ping():
         print(f"cannot reach QuestDB at {cfg.questdb.http_url}", file=sys.stderr)
         return 2
-    tickers = args.tickers or list(cfg.universe.tickers)
+    if args.sp500:
+        constituents = sp500_constituents()
+        tickers = [c["ticker"] for c in constituents]
+        pd.DataFrame(constituents).to_csv(REPO_ROOT / "configs" / "sp500.csv", index=False)
+        log.info("S&P 500 membership: %d tickers (saved to configs/sp500.csv)", len(tickers))
+    else:
+        tickers = args.tickers or list(cfg.universe.tickers)
     start = args.start or (
         pd.Timestamp.today().normalize() - pd.DateOffset(years=cfg.data.history_years)
     ).strftime("%Y-%m-%d")
-    report = load_universe(tickers, client, source=args.source or cfg.data.source, start=start)
-    _print(report)
+    report = load_universe(
+        tickers, client, source=args.source or cfg.data.source, start=start,
+        pause=args.pause, skip_existing=args.skip_existing,
+    )
+    failed = report[report["error"] != ""] if "error" in report else pd.DataFrame()
+    _print(report.head(20) if len(report) > 20 else report)
+    if len(report) > 20:
+        print(f"... {len(report)} tickers; {len(report) - len(failed)} loaded, "
+              f"{len(failed)} failed")
+    if not failed.empty:
+        print("\nfailed:")
+        _print(failed.loc[:, ["ticker", "error"]])
     return 0
 
 
@@ -119,8 +173,9 @@ def cmd_backtest(args, cfg: Config) -> int:
                 cost_bps=bt.cost_bps if args.cost_bps is None else args.cost_bps,
             ),
         )
-    if args.tickers:
-        cfg = replace(cfg, universe=replace(cfg.universe, tickers=args.tickers))
+    tickers = _sp500_tickers() if args.sp500 else args.tickers
+    if tickers:
+        cfg = replace(cfg, universe=replace(cfg.universe, tickers=tickers))
     if args.start:
         cfg = replace(cfg, universe=replace(cfg.universe, start=args.start))
 
@@ -188,6 +243,43 @@ def cmd_backtest(args, cfg: Config) -> int:
         panel=panel,
         per_ticker_daily=args.per_ticker_daily,
     )
+
+    # Is the top of the leaderboard real, or the best of 28 tries?
+    strategies_only = [r for r in results if r.style != "benchmark"]
+    benchmark = next((r for r in results if r.style == "benchmark"), None)
+    joint = {}
+    if benchmark is not None and len(strategies_only) > 1:
+        per_strategy, joint = sig.assess_study(
+            pd.DataFrame({r.key: r.net_returns for r in strategies_only}),
+            benchmark.net_returns,
+            labels={r.key: f"{r.section} {r.title}" for r in strategies_only},
+            annualization=cfg.backtest.annualization,
+            draws=args.bootstrap_draws,
+        )
+        per_strategy.to_csv(output_dir / "significance_by_strategy.csv", index=False)
+        pd.DataFrame([joint]).to_csv(output_dir / "significance.csv", index=False)
+        significance_chart(
+            per_strategy.assign(spa_p=float("nan")),
+            output_dir / "significance.png",
+            label_column="title",
+            p_column="p_vs_benchmark",
+            t_column="t_stat_vs_benchmark",
+            title="Does any strategy beat the equal-weighted benchmark?",
+            show_verdict=False,
+            max_rows=20,
+            subtitle=(
+                f"Each strategy's annualised return in excess of the benchmark, with a "
+                f"95% Newey-West interval.\nBest of {joint['n_candidates']} candidates: "
+                f"Hansen's SPA p = {joint['spa_p']:.3f}, Reality Check p = "
+                f"{joint['reality_check_p']:.3f} - the chance of a maximum this large "
+                "when no strategy has an edge."
+            ),
+        )
+        log.info(
+            "joint test: best = %s, excess %+.2f%%/yr, SPA p = %.3f, RC p = %.3f",
+            joint["best_title"], joint["best_excess_ann_return"] * 100,
+            joint["spa_p"], joint["reality_check_p"],
+        )
     if not args.no_plot:
         plot_equity_curves(results, output_dir / "equity_curves.png")
     board = leaderboard(results)
@@ -206,8 +298,11 @@ def cmd_backtest(args, cfg: Config) -> int:
 
 def cmd_per_ticker(args, cfg: Config) -> int:
     """Find the best strategy for each ticker individually and chart it."""
-    if args.tickers:
-        cfg = replace(cfg, universe=replace(cfg.universe, tickers=args.tickers))
+    tickers = _sp500_tickers() if args.sp500 else args.tickers
+    if args.sample:
+        tickers = _stratified_sample(tickers or list(cfg.universe.tickers), args.sample)
+    if tickers:
+        cfg = replace(cfg, universe=replace(cfg.universe, tickers=tickers))
     if args.train_days or args.test_days or args.cost_bps is not None:
         bt = cfg.backtest
         cfg = replace(
@@ -519,6 +614,12 @@ def build_parser() -> argparse.ArgumentParser:
     p_load.add_argument("--tickers", nargs="+")
     p_load.add_argument("--source", choices=["auto", "stooq", "yahoo"])
     p_load.add_argument("--start")
+    p_load.add_argument("--sp500", action="store_true",
+                        help="load the current S&P 500 membership instead of --tickers")
+    p_load.add_argument("--pause", type=float, default=0.0,
+                        help="seconds to wait between tickers, to stay under rate limits")
+    p_load.add_argument("--skip-existing", action="store_true",
+                        help="leave tickers already present in the table untouched")
     p_load.set_defaults(func=cmd_load)
 
     p_status = sub.add_parser("status", help="show per-ticker coverage in the bar table")
@@ -537,6 +638,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt = sub.add_parser("backtest", help="run the sliding-window out-of-sample study")
     p_bt.add_argument("--strategies", nargs="+", help="strategy keys (default: all)")
     p_bt.add_argument("--tickers", nargs="+")
+    p_bt.add_argument("--sp500", action="store_true",
+                      help="use the S&P 500 membership saved by `s151 load --sp500`")
     p_bt.add_argument("--start")
     p_bt.add_argument("--train-days", type=int)
     p_bt.add_argument("--test-days", type=int)
@@ -544,6 +647,8 @@ def build_parser() -> argparse.ArgumentParser:
     p_bt.add_argument("--cost-bps", type=float)
     p_bt.add_argument("--output")
     p_bt.add_argument("--no-plot", action="store_true")
+    p_bt.add_argument("--bootstrap-draws", type=int, default=5000,
+                      help="resamples for the joint significance test")
     p_bt.add_argument(
         "--per-ticker-daily",
         action="store_true",
@@ -564,6 +669,10 @@ def build_parser() -> argparse.ArgumentParser:
         help="find the best strategy for each ticker on its own and chart it",
     )
     p_pt.add_argument("--tickers", nargs="+")
+    p_pt.add_argument("--sp500", action="store_true",
+                      help="use the S&P 500 membership saved by `s151 load --sp500`")
+    p_pt.add_argument("--sample", type=int,
+                      help="test only this many names, spread across GICS sectors")
     p_pt.add_argument("--strategies", nargs="+", help="restrict the search (default: all)")
     p_pt.add_argument("--train-days", type=int)
     p_pt.add_argument("--test-days", type=int)

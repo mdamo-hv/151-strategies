@@ -13,6 +13,9 @@ universe:
   tickers: [NVDA, TSLA, MSFT, AMZN, WMT, JPM]
   start: "2012-01-01"
   end: null                # null -> latest bar available in the table
+  min_coverage: 0.99       # drop tickers covering less of the window than this;
+                           # the panel must be rectangular, so one late listing
+                           # would otherwise truncate everyone else's history
 
 data:
   # Stooq is the canonical source. `stooq` hits stooq.com's CSV endpoint, which

@@ -342,6 +342,12 @@ def significance_chart(
     output_path: Path,
     alpha: float = 0.05,
     subtitle: str = "",
+    label_column: str = "ticker",
+    p_column: str = "spa_p",
+    t_column: str = "t_stat_vs_buy_hold",
+    title: str = "Is the edge real, or the best of many tries?",
+    show_verdict: bool = True,
+    max_rows: int | None = None,
 ) -> Path:
     """Effect size with its uncertainty, per ticker.
 
@@ -359,16 +365,21 @@ def significance_chart(
     frame = significance.dropna(subset=["excess_ann_return"]).copy()
     if frame.empty:
         return output_path
-    frame = frame.sort_values("excess_ann_return").reset_index(drop=True)
+    frame = frame.sort_values("excess_ann_return")
+    if max_rows and len(frame) > max_rows:
+        # Keep the extremes: the top and bottom rows are what a reader checks.
+        half = max_rows // 2
+        frame = pd.concat([frame.head(half), frame.tail(max_rows - half)])
+    frame = frame.reset_index(drop=True)
 
     # The t-statistic already embeds the Newey-West standard error.
     with np.errstate(divide="ignore", invalid="ignore"):
-        se = np.abs(frame["excess_ann_return"] / frame["t_stat_vs_buy_hold"])
+        se = np.abs(frame["excess_ann_return"] / frame[t_column])
     half = 1.96 * se
 
     n = len(frame)
-    fig, ax = plt.subplots(figsize=(13.0, 0.72 * n + 3.1), facecolor=SURFACE)
-    fig.suptitle("Is the edge real, or the best of many tries?", x=0.045, ha="left",
+    fig, ax = plt.subplots(figsize=(13.0, 0.45 * n + 2.8), facecolor=SURFACE)
+    fig.suptitle(title, x=0.045, ha="left",
                  fontsize=17, fontweight="bold", color=INK_PRIMARY, y=0.975)
     if subtitle:
         fig.text(0.045, 0.90, subtitle, ha="left", va="top", fontsize=10, color=INK_SECONDARY)
@@ -380,36 +391,41 @@ def significance_chart(
         centre, positions, xerr=half.to_numpy() * 100, fmt="o", markersize=8,
         color=SERIES_1, ecolor=RECESSIVE, elinewidth=2.0, capsize=0, zorder=3,
         markeredgecolor=SURFACE, markeredgewidth=2,
-        label="excess annualised return, 95% Newey-West interval",
     )
     ax.axvline(0.0, color=INK_MUTED, linewidth=1.2, zorder=2)
     ax.set_yticks(positions)
-    ax.set_yticklabels(frame["ticker"], fontsize=11.5, fontweight="bold")
+    ax.set_yticklabels(frame[label_column], fontsize=11.5 if label_column == "ticker" else 9.0,
+                       fontweight="bold" if label_column == "ticker" else "normal")
     for tick in ax.get_yticklabels():
         tick.set_color(INK_PRIMARY)
 
     span = float(np.nanmax(np.abs(centre) + half.to_numpy() * 100))
     ax.set_xlim(-span * 1.25, span * 3.1)
     label_x = span * 1.45
-    ax.text(label_x, n - 0.35, "selection-corrected p", fontsize=9, color=INK_MUTED,
-            ha="left", va="bottom", fontweight="bold")
-    for pos, row in frame.iterrows():
-        p_value = row["spa_p"]
-        colour = POLARITY_SHORT if p_value < alpha else INK_SECONDARY
-        ax.text(label_x, pos, f"p = {p_value:.2f}", fontsize=10, color=colour,
-                va="center", ha="left", fontweight="bold" if p_value < alpha else "normal")
-        ax.text(label_x + span * 0.55, pos, row["verdict"], fontsize=9.5,
-                color=INK_SECONDARY, va="center", ha="left")
-    ax.set_xlabel("annualised return in excess of buy & hold (%)", fontsize=10,
-                  color=INK_SECONDARY)
+    if p_column in frame:
+        header = "selection-corrected p" if p_column == "spa_p" else p_column
+        ax.text(label_x, n - 0.35, header, fontsize=9, color=INK_MUTED,
+                ha="left", va="bottom", fontweight="bold")
+        for pos, row in frame.iterrows():
+            p_value = row[p_column]
+            colour = POLARITY_SHORT if p_value < alpha else INK_SECONDARY
+            ax.text(label_x, pos, f"p = {p_value:.2f}", fontsize=10, color=colour,
+                    va="center", ha="left", fontweight="bold" if p_value < alpha else "normal")
+            if show_verdict and "verdict" in row:
+                ax.text(label_x + span * 0.55, pos, row["verdict"], fontsize=9.5,
+                        color=INK_SECONDARY, va="center", ha="left")
+    # One series needs no legend box - the axis label names it. A legend placed
+    # below the axes has to be offset in axes-fraction units, which on a tall
+    # chart pushes it far past the figure and leaves a third of the canvas empty.
+    ax.set_xlabel(
+        "annualised return in excess of the benchmark (%), dot and 95% Newey-West interval",
+        fontsize=10, color=INK_SECONDARY,
+    )
     step = 5.0 if span <= 25 else 10.0
     ax.set_xticks(np.arange(-np.ceil(span / step) * step, span + step * 0.5, step))
-    legend = ax.legend(loc="lower left", bbox_to_anchor=(0.0, -0.17 - 0.02 * n),
-                       frameon=False, fontsize=9.5)
-    for text in legend.get_texts():
-        text.set_color(INK_SECONDARY)
 
-    fig.tight_layout(rect=(0.0, 0.02, 1.0, 0.86))
+    header_share = min(0.10 + 0.7 / max(n, 1), 0.26)
+    fig.tight_layout(rect=(0.0, 0.0, 1.0, 1.0 - header_share))
     output_path.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(output_path, dpi=150, facecolor=SURFACE)
     plt.close(fig)

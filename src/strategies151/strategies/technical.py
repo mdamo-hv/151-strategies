@@ -30,18 +30,20 @@ def _run_state_machine(
     el, xl = enter_long.to_numpy(), exit_long.to_numpy()
     es, xs = enter_short.to_numpy(), exit_short.to_numpy()
     out = np.zeros((len(index), len(columns)))
-    for col in range(len(columns)):
-        current = 0.0
-        for row in range(len(index)):
-            if el[row, col]:
-                current = 1.0
-            elif es[row, col]:
-                current = -1.0
-            elif current > 0 and xl[row, col]:
-                current = 0.0
-            elif current < 0 and xs[row, col]:
-                current = 0.0
-            out[row, col] = current
+    # The recursion is over time only, so the whole cross-section advances one
+    # bar at a time. Looping over names as well costs rows x names Python
+    # iterations, which at 500 names is ~2M per parameter set.
+    current = np.zeros(len(columns))
+    for row in range(len(index)):
+        long_entry, short_entry = el[row], es[row]
+        short_only = ~long_entry & short_entry      # long entry wins the bar
+        no_entry = ~long_entry & ~short_entry       # exits only apply otherwise
+        updated = np.where(long_entry, 1.0, current)
+        updated = np.where(short_only, -1.0, updated)
+        updated = np.where(no_entry & (current > 0) & xl[row], 0.0, updated)
+        updated = np.where(no_entry & (current < 0) & xs[row], 0.0, updated)
+        current = updated
+        out[row] = current
     return pd.DataFrame(out, index=index, columns=columns)
 
 

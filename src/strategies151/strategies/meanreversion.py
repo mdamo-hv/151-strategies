@@ -49,12 +49,18 @@ class PairsTrading(Strategy):
     def fit(self, train: Panel, context: Panel | None = None) -> "PairsTrading":
         rets = train.log_returns.dropna(how="all")
         corr = rets.corr()
+        # A Python double loop is 125k iterations at 500 names, per fold, per
+        # parameter set; masking the upper triangle and taking an argmax is the
+        # same search in one numpy call.
+        values = corr.to_numpy(dtype=float).copy()
+        values[~np.isfinite(values)] = -np.inf
+        values[np.tril_indices_from(values)] = -np.inf
         best, best_rho = None, -np.inf
-        for i, a in enumerate(corr.columns):
-            for b in corr.columns[i + 1 :]:
-                rho = corr.loc[a, b]
-                if np.isfinite(rho) and rho > best_rho:
-                    best, best_rho = (a, b), float(rho)
+        if values.size and np.isfinite(values).any():
+            flat = int(np.argmax(values))
+            i, j = np.unravel_index(flat, values.shape)
+            best_rho = float(values[i, j])
+            best = (str(corr.columns[i]), str(corr.columns[j]))
         if best is not None and best_rho >= self.params["min_correlation"]:
             self.pair, self.pair_correlation = best, best_rho
         else:  # no pair clears the bar -> sit out the test window
@@ -130,6 +136,12 @@ class MeanReversionMultiCluster(Strategy):
         "vol_window": (63,),
     }
 
+    #: Clustering depends only on the training window and the cluster count, not
+    #: on the lookback or volatility scaling, so the other grid axes reuse it.
+    #: At 437 names an agglomerative fit is ~0.35s, and the grid has six
+    #: parameter sets per cluster count.
+    _cluster_cache: dict = {}
+
     def __init__(self, **params):
         super().__init__(**params)
         self.clusters: dict[str, int] = {}
@@ -142,12 +154,21 @@ class MeanReversionMultiCluster(Strategy):
             self.clusters = {}
             return self
         k = min(self.params["n_clusters"], max(1, rets.shape[1] - 1))
-        corr = rets.corr().fillna(0.0).to_numpy()
-        distance = np.clip(1.0 - corr, 0.0, 2.0)
-        np.fill_diagonal(distance, 0.0)
-        model = AgglomerativeClustering(n_clusters=k, metric="precomputed", linkage="average")
-        labels = model.fit_predict(distance)
-        self.clusters = dict(zip(rets.columns, labels.tolist()))
+        key = (rets.index[0], rets.index[-1], k, tuple(rets.columns))
+        cached = type(self)._cluster_cache.get(key)
+        if cached is None:
+            corr = rets.corr().fillna(0.0).to_numpy()
+            distance = np.clip(1.0 - corr, 0.0, 2.0)
+            np.fill_diagonal(distance, 0.0)
+            model = AgglomerativeClustering(
+                n_clusters=k, metric="precomputed", linkage="average"
+            )
+            labels = model.fit_predict(distance)
+            cached = dict(zip(rets.columns, labels.tolist()))
+            if len(type(self)._cluster_cache) > 8:   # only the current fold matters
+                type(self)._cluster_cache.clear()
+            type(self)._cluster_cache[key] = cached
+        self.clusters = dict(cached)
         return self
 
     def weights(self, panel: Panel) -> pd.DataFrame:
@@ -231,13 +252,16 @@ class MeanReversionWeightedRegression(Strategy):
             r, z = values[row], z_values[row]
             if not np.isfinite(r).all() or not np.isfinite(z).all():
                 continue
-            zmat = np.diag(z)
-            q = omega.T @ zmat @ omega  # Eq. (317)
+            # `Z` is diagonal, so materialising it as an N x N matrix costs
+            # ~190k floats per bar at 437 names. Broadcasting the diagonal keeps
+            # the same algebra at O(N * K) instead of O(N^2).
+            weighted_omega = z[:, None] * omega
+            q = omega.T @ weighted_omega  # Eq. (317)
             try:
                 q_inv = np.linalg.inv(q)
             except np.linalg.LinAlgError:
                 q_inv = np.linalg.pinv(q)
-            eps = r - omega @ q_inv @ omega.T @ zmat @ r  # Eq. (315)
+            eps = r - omega @ (q_inv @ (weighted_omega.T @ r))  # Eq. (315)
             out[row] = -(z * eps)  # Eq. (314), traded contrarian
         frame = pd.DataFrame(out, index=rets.index, columns=rets.columns)
         return normalize_gross(frame)

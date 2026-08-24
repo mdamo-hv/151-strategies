@@ -9,6 +9,22 @@ from strategies151.data.panel import Panel
 from strategies151.strategies.base import Strategy, normalize_gross
 
 
+def _feature_stack(panel: Panel, lengths: tuple[int, ...]) -> tuple[np.ndarray, list[str]]:
+    """Features as one ``(bars, names, features)`` array.
+
+    The strategy is per-name, but the features are not: building a DataFrame per
+    ticker inside the fold loop costs one pandas construction per name per
+    parameter set per fold - 1.3 million of them across a 437-name study, which
+    dominates everything else the strategy does. Computing the rolling
+    statistics once for the whole cross-section and slicing with numpy is the
+    same arithmetic without the overhead.
+    """
+    frames = _features(panel, lengths)
+    names = list(frames)
+    stack = np.stack([frames[name].to_numpy(dtype=float) for name in names], axis=-1)
+    return stack, names
+
+
 def _features(panel: Panel, lengths: tuple[int, ...]) -> dict[str, pd.DataFrame]:
     """Predictor variables ``X_a(t)`` - Eq. (333)-(335).
 
@@ -19,11 +35,16 @@ def _features(panel: Panel, lengths: tuple[int, ...]) -> dict[str, pd.DataFrame]
     """
     feats: dict[str, pd.DataFrame] = {}
     close, volume = panel.close, panel.volume
-    for length in lengths:
-        ma = close.rolling(length, min_periods=max(2, length // 2)).mean()
-        feats[f"price_ma_{length}"] = close / ma - 1.0
-        vma = volume.rolling(length, min_periods=max(2, length // 2)).mean()
-        feats[f"volume_ma_{length}"] = np.log(volume / vma.replace(0.0, np.nan))
+    # Zero-volume bars exist in a 500-name universe; log(0) is -inf, which the
+    # callers drop as non-finite. Silencing keeps the run readable.
+    with np.errstate(divide="ignore", invalid="ignore"):
+        for length in lengths:
+            ma = close.rolling(length, min_periods=max(2, length // 2)).mean()
+            feats[f"price_ma_{length}"] = close / ma - 1.0
+            vma = volume.rolling(length, min_periods=max(2, length // 2)).mean()
+            feats[f"volume_ma_{length}"] = np.log(
+                volume.replace(0.0, np.nan) / vma.replace(0.0, np.nan)
+            )
     return feats
 
 
@@ -61,45 +82,52 @@ class SingleStockKNN(Strategy):
         from sklearn.neighbors import NearestNeighbors
 
         horizon = self.params["horizon"]
-        feats = _features(train, tuple(self.params["feature_lengths"]))
+        stack, names = _feature_stack(train, tuple(self.params["feature_lengths"]))
+        stack = np.where(np.isfinite(stack), stack, np.nan)
         # Target Y(t): realised forward return over the next `horizon` bars, Eq. (332).
-        target = train.close.shift(-horizon) / train.close - 1.0
+        target = (train.close.shift(-horizon) / train.close - 1.0).to_numpy(dtype=float)
         self.models = {}
-        for ticker in train.close.columns:
-            frame = pd.DataFrame({name: f[ticker] for name, f in feats.items()})
-            frame["__y"] = target[ticker]
-            frame = frame.replace([np.inf, -np.inf], np.nan).dropna()
-            if len(frame) < 30:
+        for position, ticker in enumerate(train.close.columns):
+            x = stack[:, position, :]
+            y = target[:, position]
+            usable = np.isfinite(x).all(axis=1) & np.isfinite(y)
+            if usable.sum() < 30:
                 continue
-            x = frame.drop(columns="__y")
-            lo, hi = x.min(), x.max()
-            span = (hi - lo).replace(0.0, np.nan)
-            x_norm = ((x - lo) / span).fillna(0.5)  # Eq. (337)
-            k = self.params["k"] or int(np.floor(np.sqrt(len(frame))))
-            k = max(1, min(k, len(frame)))
-            model = NearestNeighbors(n_neighbors=k).fit(x_norm.to_numpy())
+            x, y = x[usable], y[usable]
+            lo, hi = x.min(axis=0), x.max(axis=0)
+            span = np.where(hi - lo > 0, hi - lo, np.nan)
+            with np.errstate(invalid="ignore"):
+                x_norm = np.nan_to_num((x - lo) / span, nan=0.5)  # Eq. (337)
+            k = self.params["k"] or int(np.floor(np.sqrt(len(x))))
+            k = max(1, min(k, len(x)))
             self.models[ticker] = {
-                "model": model,
-                "y": frame["__y"].to_numpy(),
+                "model": NearestNeighbors(n_neighbors=k).fit(x_norm),
+                "y": y,
                 "lo": lo,
                 "span": span,
-                "columns": list(x.columns),
+                "features": names,
             }
         return self
 
     def _predict(self, panel: Panel) -> pd.DataFrame:
-        feats = _features(panel, tuple(self.params["feature_lengths"]))
-        out = pd.DataFrame(np.nan, index=panel.close.index, columns=panel.close.columns)
-        for ticker, state in self.models.items():
-            frame = pd.DataFrame({name: f[ticker] for name, f in feats.items()})[state["columns"]]
-            frame = frame.replace([np.inf, -np.inf], np.nan)
-            usable = frame.dropna()
-            if usable.empty:
+        stack, names = _feature_stack(panel, tuple(self.params["feature_lengths"]))
+        stack = np.where(np.isfinite(stack), stack, np.nan)
+        columns = list(panel.close.columns)
+        out = np.full((stack.shape[0], len(columns)), np.nan)
+        for position, ticker in enumerate(columns):
+            state = self.models.get(ticker)
+            if state is None:
                 continue
-            x_norm = ((usable - state["lo"]) / state["span"]).fillna(0.5)
-            _, idx = state["model"].kneighbors(x_norm.to_numpy())
-            out.loc[usable.index, ticker] = state["y"][idx].mean(axis=1)  # Eq. (339)
-        return out
+            order = [names.index(f) for f in state["features"]]
+            x = stack[:, position, :][:, order]
+            usable = np.isfinite(x).all(axis=1)
+            if not usable.any():
+                continue
+            with np.errstate(invalid="ignore"):
+                x_norm = np.nan_to_num((x[usable] - state["lo"]) / state["span"], nan=0.5)
+            _, idx = state["model"].kneighbors(x_norm)
+            out[usable, position] = state["y"][idx].mean(axis=1)  # Eq. (339)
+        return pd.DataFrame(out, index=panel.close.index, columns=columns)
 
     def weights(self, panel: Panel) -> pd.DataFrame:
         if not self.models:

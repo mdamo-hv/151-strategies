@@ -32,6 +32,10 @@ python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
 ./.venv/bin/s151 backtest --strategies 3.1.price_momentum 3.9.mean_reversion_single_cluster
 ./.venv/bin/s151 per-ticker                 # best strategy for each name -> data/
 ./.venv/bin/s151 significance data/<stamp>  # is that winner real, or luck?
+
+./.venv/bin/s151 load --sp500               # the whole index
+./.venv/bin/s151 backtest --sp500 --output results_sp500
+./.venv/bin/s151 per-ticker --sp500 --sample 12 --output data_sp500
 ```
 
 Everything is configured in [`configs/default.yaml`](configs/default.yaml);
@@ -380,6 +384,138 @@ Per-strategy daily return series are saved as `<TICKER>_daily_returns.csv`, so
 the tests can be re-run with more draws or a different block length without
 touching the backtest.
 
+
+## The same analysis on the S&P 500
+
+The six-name study kept running into one limitation: cross-sectional strategies
+need breadth, and six mega-caps is not a cross-section. So the whole thing was
+re-run on the index.
+
+```bash
+s151 load --sp500                      # 503 constituents into stooq.daily
+s151 backtest --sp500 --output results_sp500
+s151 per-ticker --sp500 --sample 12 --output data_sp500
+```
+
+* **503 constituents loaded**; **3678** bars, **437** names carry the full
+  window and form the rectangular panel (see *Two survivorship filters* below).
+* Same protocol: 252-day train → 21-day test, walked forward
+  **125 folds**, out-of-sample **2016-03-11 to 2026-08-20**,
+  5 bps costs, delay 1.
+
+### Breadth rescues the mean-reversion alphas — and costs destroy them
+
+| Section | Strategy | Ann. return | Net Sharpe | Gross Sharpe | Cost drag | Turnover | Max DD | Calmar |
+|---|---|---:|---:|---:|---:|---:|---:|---:|
+| 4.1.2 | Dual-momentum rotation | 13.3% | 1.04 | 1.14 | 1.2% | 24x | -15.4% | 0.86 |
+| *–* | *Equal-weighted buy & hold (benchmark)* | *17.8%* | *1.00* | *–* | *–* | *–* | *-38.1%* | *0.47* |
+| 3.1 | Price-momentum (long-only) | 16.7% | 0.94 | 1.04 | 1.9% | 37x | -33.4% | 0.50 |
+| 6.5 | Volatility targeting with risk-free asset | 12.7% | 0.93 | 0.94 | 0.1% | 2x | -26.1% | 0.49 |
+| 4.1 | Momentum rotation | 16.8% | 0.93 | 1.01 | 1.4% | 28x | -35.0% | 0.48 |
+| 4.6 | Multi-asset trend following | 15.7% | 0.88 | 0.95 | 1.3% | 26x | -34.0% | 0.46 |
+| 3.15 | Channel (Donchian) | 7.4% | 0.53 | 0.61 | 1.3% | 27x | -37.3% | 0.20 |
+| 3.4 | Low-volatility anomaly | 5.7% | 0.49 | 0.53 | 0.5% | 9x | -33.5% | 0.17 |
+| 3.11 | Single moving average | 6.2% | 0.45 | 0.56 | 1.7% | 35x | -37.2% | 0.17 |
+| 3.14 | Support and resistance | 1.4% | 0.16 | 0.64 | 9.4% | 189x | -40.8% | 0.03 |
+| 3.10 | Mean-reversion (weighted regression) | -0.6% | -0.04 | 0.64 | 4.9% | 98x | -24.8% | -0.02 |
+| 3.18.1 | Statistical arbitrage (dollar-neutral) | -0.8% | -0.14 | 0.64 | 3.9% | 78x | -20.3% | -0.04 |
+| 3.9 | Mean-reversion (single cluster) | -1.6% | -0.14 | 0.44 | 5.0% | 101x | -29.7% | -0.05 |
+| 10.4 | Trend following (sign/vol weighting) | -2.2% | -0.20 | -0.02 | 1.6% | 33x | -44.9% | -0.05 |
+| 3.9.1 | Mean-reversion (multiple clusters) | -2.2% | -0.21 | 0.35 | 4.9% | 97x | -36.6% | -0.06 |
+| 3.1 | Price-momentum (long/short) | -2.3% | -0.22 | 0.00 | 2.0% | 40x | -29.8% | -0.08 |
+| 10.3 | Contrarian trading (market-index demeaned) | -2.4% | -0.25 | 0.35 | 5.0% | 99x | -31.6% | -0.07 |
+| 10.3.1 | Contrarian trading with volume filter | -3.5% | -0.28 | 0.40 | 7.4% | 147x | -42.2% | -0.08 |
+| 4.3 | R-squared selectivity | -2.5% | -0.29 | -0.16 | 1.0% | 20x | -28.8% | -0.09 |
+| 3.7 | Residual momentum (market-residual proxy) | -2.5% | -0.29 | -0.14 | 1.2% | 24x | -30.0% | -0.08 |
+| 3.13 | Three moving averages | -5.4% | -0.33 | -0.15 | 2.5% | 51x | -50.2% | -0.11 |
+| 3.12 | Two moving averages | -4.6% | -0.34 | -0.27 | 0.8% | 15x | -45.3% | -0.10 |
+| 3.20 | Alpha combos | -5.3% | -0.52 | 0.22 | 7.1% | 142x | -50.5% | -0.10 |
+| 3.6 | Multifactor portfolio (rank blend) | -4.3% | -0.53 | -0.16 | 2.8% | 57x | -40.0% | -0.11 |
+| 4.1.1 | Momentum rotation with MA filter | -7.2% | -0.54 | -0.34 | 2.5% | 49x | -57.4% | -0.13 |
+| 3.8 | Pairs trading | -1.6% | -1.07 | 1.67 | 3.9% | 78x | -15.6% | -0.10 |
+| 3.17 | Single-stock KNN | -8.0% | -1.12 | 0.44 | 11.2% | 224x | -58.1% | -0.14 |
+| 4.4 | Mean-reversion (internal bar strength) | -6.8% | -1.20 | 0.85 | 11.7% | 234x | -55.4% | -0.12 |
+| 3.18 | Statistical arbitrage (mean-variance optimisation) | -19.0% | -9.53 | -1.38 | 18.0% | 361x | -88.9% | -0.21 |
+
+This is the headline, and it is not what the six-name study showed. Look at the
+**gross** column:
+
+* On six names, mean-reversion was negative *even before costs*.
+* On 437 names it is clearly positive gross — **pairs trading 1.67**, internal
+  bar strength 0.85, weighted-regression mean-reversion 0.64, dollar-neutral
+  statistical arbitrage 0.64. Breadth is exactly what those constructions
+  needed, as Section 3.21 of the paper argues.
+* And every one of them is negative **net**, because they turn the book over
+  78–361 times a year and 5 bps a side costs 3.9–18% annually.
+
+That is the paper's own verdict on data-mined alphas, in Section 3.20: *"these
+ubiquitous alphas are faint, ephemeral and cannot be traded on their own as any
+profit on paper would be eaten away by trading costs."* The study reproduces it
+quantitatively.
+
+### Does anything beat the index?
+
+![Does any strategy beat the benchmark](results_sp500/significance.png)
+
+**No. Zero of 28 strategies have a positive excess return over the
+equal-weighted benchmark.** The best (4.1 momentum rotation) is
+-0.71%/yr, and the joint test over all 28
+candidates gives **Hansen's SPA p = 0.730**, Reality Check p =
+0.969.
+
+One strategy is worth a second look on risk-adjusted terms: **4.1.2
+dual-momentum rotation** is the only net Sharpe above the benchmark (1.04 vs
+1.00) and it does so with **less than half the drawdown** (-15.4% vs -38.1%),
+giving a Calmar of 0.86 against 0.47. Its excess *return* is still -4.7%/yr, so
+it does not register on a test built on mean excess return — a real limitation
+of the White/Hansen framework as applied here, and one the table above is
+arranged to make visible.
+
+### 3.18 breaks at this scale, exactly as the paper warns
+
+Statistical arbitrage posts a net Sharpe of **-9.53** and is negative gross too
+(-1.38). Its covariance is 437x437 estimated from 252 observations — footnote 62
+of the paper says precisely this matrix is singular and unstable out-of-sample,
+and recommends a multifactor risk model instead. A ridge keeps the optimisation
+well-posed but cannot manufacture the missing information. Treat the row as a
+demonstration of the failure mode, not as a result.
+
+### Per-ticker, on a sample
+
+Running the per-ticker study on all 500 names would take about a day: the cost
+is per name and does not fall with universe size. `--sample 12` takes a
+sector-spread subset instead (11 of them clear the history filter):
+
+| Ticker | Best strategy | Excess ann. return | p vs buy & hold | SPA p | Verdict |
+|---|---|---:|---:|---:|---|
+| **GOOG** | 6 5.volatility_targeting | -9.5% | 1.00 | **0.50** | lower return than buy & hold (significant) |
+| **MMM** | 3 15.channel | +6.2% | 0.26 | **0.65** | profitable, but no better than buy & hold |
+| **APD** | 6 5.volatility_targeting | -4.7% | 0.95 | **0.75** | profitable, but no better than buy & hold |
+| **AFL** | 6 5.volatility_targeting | -5.4% | 0.95 | **0.77** | profitable, but no better than buy & hold |
+| **ACN** | 6 5.volatility_targeting | -2.8% | 0.75 | **0.79** | not distinguishable from luck |
+| **GOOGL** | 6 5.volatility_targeting | -10.6% | 1.00 | **0.79** | lower return than buy & hold (significant) |
+| **ARE** | 3 15.channel | +1.1% | 0.47 | **0.81** | not distinguishable from luck |
+| **APA** | 3 11.single_moving_average | +2.3% | 0.47 | **0.82** | not distinguishable from luck |
+| **ABT** | 6 5.volatility_targeting | -5.2% | 0.98 | **0.83** | lower return than buy & hold (significant) |
+| **AES** | 6 5.volatility_targeting | -6.3% | 0.85 | **0.86** | not distinguishable from luck |
+| **MO** | 6 5.volatility_targeting | -1.9% | 0.77 | **0.88** | not distinguishable from luck |
+
+**0 of 11 survive**, SPA p-values 0.50–0.88 — the same answer the six-name
+study gave, on a different and larger sample.
+
+### Two survivorship filters, both stated
+
+1. **Current index membership applied to history.** Companies dropped from the
+   index, or that failed, are absent. This flatters every long-only result,
+   including the benchmark.
+2. **Full-history requirement.** Strategies need a rectangular cross-section, so
+   the 66 names that listed mid-window (ABNB, GEV, SNDK, ...) are excluded
+   rather than truncating everyone else's history to their IPO date. `s151`
+   logs which names were dropped and why.
+
+Neither is fixable without a point-in-time membership file. Both are recorded in
+`results_sp500/run_context.json` so they travel with the numbers.
+
 ---
 
 ## What is implemented, and what is not
@@ -468,6 +604,7 @@ src/strategies151/
   data/
     questdb.py            stooq.daily DDL, bulk /imp ingest, PG-wire reads
     loaders.py            stooq (primary) and yahoo (fallback) sources
+    universe.py           S&P 500 membership, symbol conventions
     panel.py              aligned wide OHLCV panel + derived return frames
   strategies/
     base.py               Strategy protocol + the paper's weight primitives
@@ -486,7 +623,7 @@ src/strategies151/
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
     charts.py             research cards and the per-ticker summary chart
-tests/                    275 tests: causality, attribution, test calibration
+tests/                    288 tests: causality, attribution, test calibration
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an

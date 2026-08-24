@@ -350,3 +350,72 @@ def verdict(row: dict, alpha: float = 0.05) -> str:
     if row.get("p_vs_zero", 1.0) < alpha:
         return "profitable, but no better than buy & hold"
     return "not distinguishable from luck"
+
+
+def assess_study(
+    candidate_returns: pd.DataFrame,
+    benchmark_returns: pd.Series,
+    labels: dict[str, str] | None = None,
+    annualization: int = 252,
+    draws: int = DEFAULT_DRAWS,
+    block: float = DEFAULT_BLOCK,
+    seed: int = DEFAULT_SEED,
+) -> tuple[pd.DataFrame, dict]:
+    """Test a whole strategy library against a benchmark.
+
+    The per-strategy rows answer "did *this* strategy beat the benchmark",
+    ignoring that it sits in a library of many.  The joint result answers the
+    question that matters once you quote the leaderboard's top row: could the
+    best of this many candidates have looked this good by chance alone?
+
+    Returns ``(per-strategy frame, joint result)``.
+    """
+    aligned = candidate_returns.dropna(how="all")
+    benchmark = benchmark_returns.reindex(aligned.index)
+    excess = aligned.sub(benchmark, axis=0).dropna()
+
+    rows = []
+    for name in excess.columns:
+        own = mean_test(aligned[name].dropna())
+        against = mean_test(excess[name])
+        series = aligned[name].dropna()
+        rows.append({
+            "key": name,
+            "title": (labels or {}).get(name, name),
+            "ann_return": own.annualized_mean,
+            "sharpe": float(series.mean() / series.std(ddof=1) * np.sqrt(annualization))
+            if series.std(ddof=1) > 0 else float("nan"),
+            "t_stat_vs_zero": own.t_stat,
+            "p_vs_zero": own.p_value,
+            "excess_ann_return": against.annualized_mean,
+            "t_stat_vs_benchmark": against.t_stat,
+            "p_vs_benchmark": against.p_value,
+            "p_worse_than_benchmark": 1.0 - against.p_value,
+        })
+    per_strategy = pd.DataFrame(rows).sort_values("excess_ann_return", ascending=False)
+
+    joint = reality_check(excess, draws=draws, block=block, seed=seed)
+    best_series = aligned[joint.best_name] if joint.best_name in aligned else pd.Series(dtype=float)
+    per_period = np.array([
+        aligned[c].mean() / aligned[c].std(ddof=1) if aligned[c].std(ddof=1) > 0 else np.nan
+        for c in aligned.columns
+    ])
+    dsr, threshold = deflated_sharpe_ratio(best_series, per_period)
+    bench_sharpe = float(benchmark.mean() / benchmark.std(ddof=1))
+
+    summary = {
+        "best_strategy": joint.best_name,
+        "best_title": (labels or {}).get(joint.best_name, joint.best_name),
+        "n_candidates": joint.n_candidates,
+        "n_days": joint.n_obs,
+        "best_excess_ann_return": float(excess[joint.best_name].mean() * annualization)
+        if joint.best_name in excess else float("nan"),
+        "reality_check_p": joint.reality_check_p,
+        "spa_p": joint.spa_p,
+        "deflated_sharpe_prob": dsr,
+        "luck_threshold_sharpe_ann": threshold * np.sqrt(annualization),
+        "psr_vs_benchmark": probabilistic_sharpe_ratio(best_series, bench_sharpe),
+        "bootstrap_draws": draws,
+        "bootstrap_block": block,
+    }
+    return per_strategy, summary
