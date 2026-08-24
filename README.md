@@ -593,6 +593,31 @@ redone with more bootstrap draws or a different block length in seconds:
 ./.venv/bin/s151 significance data_sp500/<stamp> --draws 20000 --block 20
 ```
 
+### If a documented flag is "unrecognized"
+
+```
+s151: error: unrecognized arguments: --sp500
+```
+
+means the installed copy is older than the docs. Check what is actually running:
+
+```bash
+./.venv/bin/s151 --version        # version, source directory and commit
+./.venv/bin/s151 --help           # the subcommand list dates the build
+```
+
+The subcommand list is a quick version marker: `significance` and `--sp500`
+landed together with the S&P 500 work. If either is missing:
+
+```bash
+git pull                                     # get the code
+./.venv/bin/pip install -e ".[dev]"          # editable, so future pulls apply
+which -a s151                                # make sure no other s151 shadows it
+```
+
+`pip install .` (without `-e`) copies a snapshot into site-packages, so a later
+`git pull` changes nothing until you reinstall. Use `-e`.
+
 ### Notes
 
 * **Memory.** The 437-name panel is ~65 MB; each worker gets only its own

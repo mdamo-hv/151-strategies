@@ -85,6 +85,30 @@ def _stratified_sample(tickers: list[str], size: int) -> list[str]:
         round_index += 1
     return chosen[:size]
 
+
+def _version_string() -> str:
+    """Package version, plus the working-tree commit when running from a clone.
+
+    An installed copy that is older than the checkout is the usual reason a
+    documented flag comes back as `unrecognized arguments`, so make it cheap to
+    see which code is actually running.
+    """
+    import subprocess
+
+    from strategies151 import __version__
+
+    parts = [f"s151 {__version__}", f"({Path(__file__).resolve().parent})"]
+    try:
+        commit = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "--short", "HEAD"],
+            capture_output=True, text=True, timeout=5, check=True,
+        ).stdout.strip()
+        if commit:
+            parts.insert(1, f"commit {commit}")
+    except Exception:  # noqa: BLE001 - not a git checkout, or no git
+        pass
+    return "  ".join(parts)
+
 # ------------------------------------------------------------------ commands --
 def cmd_load(args, cfg: Config) -> int:
     client = QuestDBClient(cfg.questdb)
@@ -647,6 +671,10 @@ def build_parser() -> argparse.ArgumentParser:
         description="151 Trading Strategies research track over QuestDB stooq.daily bars.",
     )
     parser.add_argument("--config", help="path to a YAML config (default: configs/default.yaml)")
+    parser.add_argument(
+        "--version", action="version", version=_version_string(),
+        help="show the version, source directory and commit being run",
+    )
     parser.add_argument("-v", "--log-level", default="INFO")
     sub = parser.add_subparsers(dest="command", required=True)
 
