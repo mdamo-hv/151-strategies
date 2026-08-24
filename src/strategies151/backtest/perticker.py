@@ -23,6 +23,7 @@ import numpy as np
 import pandas as pd
 
 from strategies151.backtest import metrics as m
+from strategies151.backtest import significance as sig
 from strategies151.backtest.engine import WalkForwardResult, buy_and_hold, common_folds, walk_forward
 from strategies151.config import Config
 from strategies151.data.panel import Panel
@@ -126,6 +127,14 @@ class TickerStudy:
     train_days: int = 252
     test_days: int = 21
     cost_bps: float = 5.0
+    #: Daily out-of-sample net returns, one column per applicable strategy.
+    candidate_returns: pd.DataFrame = field(default_factory=pd.DataFrame)
+    #: Output of :func:`strategies151.backtest.significance.assess`.
+    significance: dict = field(default_factory=dict)
+
+    @property
+    def verdict(self) -> str:
+        return sig.verdict(self.significance) if self.significance else "not tested"
 
     @property
     def close(self) -> pd.Series:
@@ -187,6 +196,8 @@ def run_ticker_study(
     panel: Panel,
     cfg: Config,
     strategy_keys: Sequence[str] | None = None,
+    bootstrap_draws: int = sig.DEFAULT_DRAWS,
+    bootstrap_block: float = sig.DEFAULT_BLOCK,
 ) -> TickerStudy:
     """Backtest every strategy on a one-name universe and rank the applicable ones."""
     single = Panel(**{f: getattr(panel, f)[[ticker]] for f in ("open", "high", "low", "close", "volume")})
@@ -254,6 +265,28 @@ def run_ticker_study(
     reference = best or (results[0] if results else None)
     benchmark = buy_and_hold(single, cfg, index=reference.daily.index if reference else None)
 
+    # Only the applicable candidates enter the significance tests: including a
+    # strategy that never takes a position, or one that is buy & hold wearing a
+    # different name, would misstate how many real choices the winner survived.
+    active_keys = list(active["key"]) if not active.empty else []
+    by_key = {r.key: r for r in results}
+    candidate_returns = pd.DataFrame(
+        {k: by_key[k].net_returns for k in active_keys if k in by_key}
+    ).sort_index()
+
+    assessment: dict = {}
+    if best is not None and candidate_returns.shape[1] >= 1:
+        assessment = sig.assess(
+            ticker=ticker,
+            best_name=best.key,
+            best_returns=best.net_returns,
+            benchmark_returns=benchmark.net_returns,
+            candidate_returns=candidate_returns,
+            annualization=cfg.backtest.annualization,
+            draws=bootstrap_draws,
+            block=bootstrap_block,
+        )
+
     return TickerStudy(
         ticker=ticker,
         panel=single,
@@ -265,6 +298,8 @@ def run_ticker_study(
         train_days=cfg.backtest.train_days,
         test_days=cfg.backtest.test_days,
         cost_bps=cfg.backtest.cost_bps,
+        candidate_returns=candidate_returns,
+        significance=assessment,
     )
 
 
@@ -276,6 +311,18 @@ def studies_frame(studies: Sequence[TickerStudy]) -> pd.DataFrame:
     frame = pd.concat(frames, ignore_index=True)
     frame["params"] = frame["params"].apply(json.dumps, default=str)
     return frame
+
+
+def significance_frame(studies: Sequence[TickerStudy]) -> pd.DataFrame:
+    """One row per ticker with every test statistic and a plain-language verdict."""
+    rows = []
+    for study in studies:
+        if not study.significance:
+            continue
+        row = dict(study.significance)
+        row["verdict"] = study.verdict
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def winners_frame(studies: Sequence[TickerStudy]) -> pd.DataFrame:

@@ -21,6 +21,33 @@ def _shrink(cov: np.ndarray, intensity: float) -> np.ndarray:
     return (1.0 - intensity) * cov + intensity * np.diag(np.diag(cov))
 
 
+def _safe_inverse(cov: np.ndarray, max_condition: float = 1e10) -> np.ndarray:
+    """Invert a covariance matrix, ridging it first if it is ill-conditioned.
+
+    Footnote 62 of the paper: the sample covariance is singular whenever
+    ``T <= N + 1``, and unstable out-of-sample unless ``T >> N``.  With a
+    252-day training window and a 437-name universe that is always the case, and
+    inverting it anyway produces enormous weights along near-null eigenvectors -
+    which in-sample tuning then *prefers*, because those weights fit the
+    training window almost perfectly.  Adding the smallest ridge that brings the
+    condition number under control keeps the optimisation well-posed.
+    """
+    cov = np.atleast_2d(np.asarray(cov, dtype=float))
+    n = cov.shape[0]
+    eigenvalues = np.linalg.eigvalsh(cov)
+    largest = float(eigenvalues[-1])
+    smallest = float(eigenvalues[0])
+    if largest <= 0:
+        return np.eye(n)
+    if smallest <= 0 or largest / smallest > max_condition:
+        ridge = largest / max_condition - smallest
+        cov = cov + np.eye(n) * max(ridge, largest * 1e-12)
+    try:
+        return np.linalg.inv(cov)
+    except np.linalg.LinAlgError:
+        return np.linalg.pinv(cov)
+
+
 def _principal_component_cov(cov: np.ndarray, n_factors: int) -> np.ndarray:
     """Rebuild the covariance from its top ``n_factors`` principal components
     plus a diagonal specific-risk remainder (Appendix A's ``qrm.cov.pc``)."""
@@ -60,6 +87,7 @@ class StatArbOptimization(Strategy):
         super().__init__(**params)
         self.inv_cov: np.ndarray | None = None
         self.columns: list[str] = []
+        self.n_train: int = 0
 
     def fit(self, train: Panel, context: Panel | None = None) -> "StatArbOptimization":
         rets = train.log_returns.dropna(how="all").fillna(0.0)
@@ -71,10 +99,8 @@ class StatArbOptimization(Strategy):
             cov = _principal_component_cov(cov, self.params["n_factors"])
         elif model == "shrunk":
             cov = _shrink(cov, self.params["shrinkage"])
-        try:
-            self.inv_cov = np.linalg.inv(cov)
-        except np.linalg.LinAlgError:
-            self.inv_cov = np.linalg.pinv(cov)
+        self.n_train = len(rets)
+        self.inv_cov = _safe_inverse(cov)
         return self
 
     def _expected_returns(self, panel: Panel) -> pd.DataFrame:
@@ -89,18 +115,22 @@ class StatArbOptimization(Strategy):
             return self._empty(panel)
         expected = self._expected_returns(panel).reindex(columns=self.columns)
         c_inv = self.inv_cov
-        ones = np.ones(len(self.columns))
-        denom = float(ones @ c_inv @ ones)
-        out = np.zeros(expected.shape)
         values = expected.to_numpy()
-        for row in range(len(values)):
-            e = values[row]
-            if not np.isfinite(e).all():
-                continue
-            w = c_inv @ e  # Eq. (350)/(353)
-            if self.params["dollar_neutral"] and abs(denom) > 1e-12:
-                w = w - c_inv @ ones * (ones @ c_inv @ e) / denom  # Eq. (358)
-            out[row] = w
+        usable = np.isfinite(values).all(axis=1)
+        out = np.zeros(values.shape)
+        if usable.any():
+            rows = values[usable]
+            # One matmul for the whole window: a per-row `C^-1 @ E` loop is
+            # 437x437 per bar, which dominates the entire study at this scale.
+            weights = rows @ c_inv.T  # Eq. (350)/(353); C is symmetric
+            if self.params["dollar_neutral"]:
+                ones = np.ones(len(self.columns))
+                c_inv_ones = c_inv @ ones
+                denom = float(ones @ c_inv_ones)
+                if abs(denom) > 1e-12:
+                    scale = (rows @ c_inv_ones) / denom
+                    weights = weights - np.outer(scale, c_inv_ones)  # Eq. (358)
+            out[usable] = weights
         frame = pd.DataFrame(out, index=expected.index, columns=self.columns)
         return normalize_gross(frame).reindex(columns=panel.close.columns).fillna(0.0)
 

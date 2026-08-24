@@ -179,3 +179,40 @@ def test_chart_survives_a_ticker_with_no_applicable_strategy(panel: Panel, cfg: 
     )
     assert study.best is None
     assert ticker_chart(study, tmp_path / "empty.png").exists()
+
+
+def test_parallel_and_sequential_studies_agree(panel: Panel, cfg: Config, tmp_path):
+    """Workers must not change any number - only the wall-clock.
+
+    Each ticker is an independent one-name study, so parallelising the loop is
+    safe; this pins that down rather than assuming it.
+    """
+    from strategies151.cli import _per_ticker_worker, _single_ticker_panel
+
+    keys = ["3.11.single_moving_average", "3.15.channel"]
+    payloads = [
+        (t, _single_ticker_panel(panel, t), cfg, keys, 200, 10.0)
+        for t in panel.tickers[:2]
+    ]
+    direct = [_per_ticker_worker(p) for p in payloads]
+
+    from concurrent.futures import ProcessPoolExecutor
+
+    with ProcessPoolExecutor(max_workers=2) as pool:
+        parallel = list(pool.map(_per_ticker_worker, payloads, chunksize=1))
+
+    for a, b in zip(direct, parallel):
+        assert a.ticker == b.ticker
+        assert a.best.key == b.best.key
+        pd.testing.assert_frame_equal(
+            a.table.drop(columns="params"), b.table.drop(columns="params")
+        )
+        assert a.significance["spa_p"] == pytest.approx(b.significance["spa_p"])
+
+
+def test_single_ticker_panel_keeps_one_column(panel: Panel):
+    from strategies151.cli import _single_ticker_panel
+
+    single = _single_ticker_panel(panel, panel.tickers[0])
+    assert single.tickers == [panel.tickers[0]]
+    assert len(single) == len(panel)

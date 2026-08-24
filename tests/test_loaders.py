@@ -93,3 +93,58 @@ def test_yahoo_dates_are_normalised_to_trading_days(monkeypatch):
     frame = source.fetch("NVDA")
     assert (frame["date"] == frame["date"].dt.normalize()).all()
     assert frame["date"].dt.tz is None
+
+
+def test_circuit_breaker_stops_retrying_a_dead_source(monkeypatch):
+    """A source that keeps failing must be dropped, not retried 500 times.
+
+    Loading a 500-name universe against a host that is blocking us otherwise
+    pays a full timeout per ticker - the difference between a ten-minute load
+    and a four-hour one.
+    """
+    from strategies151.data import loaders
+
+    loaders.reset_circuit_breakers()
+    calls = {"stooq": 0, "yahoo": 0}
+
+    class DeadStooq:
+        def fetch(self, ticker, start=None, end=None):
+            calls["stooq"] += 1
+            raise loaders.DataSourceError("access denied")
+
+    class LiveYahoo:
+        def fetch(self, ticker, start=None, end=None):
+            calls["yahoo"] += 1
+            return StooqSource._parse(ticker, STOOQ_CSV)
+
+    monkeypatch.setitem(loaders.SOURCES, "stooq", DeadStooq)
+    monkeypatch.setitem(loaders.SOURCES, "yahoo", LiveYahoo)
+
+    for i in range(20):
+        loaders.fetch_bars(f"T{i}", source="auto")
+
+    assert calls["stooq"] == loaders.CIRCUIT_BREAKER_THRESHOLD
+    assert calls["yahoo"] == 20
+    loaders.reset_circuit_breakers()
+
+
+def test_circuit_breaker_resets_after_a_success(monkeypatch):
+    from strategies151.data import loaders
+
+    loaders.reset_circuit_breakers()
+    state = {"fail": True}
+
+    class Flaky:
+        def fetch(self, ticker, start=None, end=None):
+            if state["fail"]:
+                raise loaders.DataSourceError("temporary")
+            return StooqSource._parse(ticker, STOOQ_CSV)
+
+    monkeypatch.setitem(loaders.SOURCES, "stooq", Flaky)
+    for _ in range(3):
+        with pytest.raises(loaders.DataSourceError):
+            loaders.fetch_bars("X", source="stooq")
+    state["fail"] = False
+    loaders.fetch_bars("X", source="stooq")
+    assert loaders._consecutive_failures["stooq"] == 0
+    loaders.reset_circuit_breakers()

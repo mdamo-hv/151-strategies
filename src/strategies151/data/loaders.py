@@ -23,6 +23,7 @@ import pandas as pd
 import requests
 
 from strategies151.data.questdb import OHLCV_COLUMNS, QuestDBClient
+from strategies151.data.universe import to_stooq_symbol, to_yahoo_symbol
 
 log = logging.getLogger(__name__)
 
@@ -60,10 +61,17 @@ class StooqSource:
     name = "stooq"
     base = "https://stooq.com"
 
-    def __init__(self, timeout: float = 30.0):
+    def __init__(self, timeout: float = 8.0):
         self.timeout = timeout
         self.session = requests.Session()
         self.session.headers.update({"User-Agent": _UA, "Referer": f"{self.base}/"})
+        # urllib3 retries a failed connection three times underneath the
+        # per-request timeout, so a host that black-holes us costs about four
+        # times the timeout rather than the timeout. Disable it and let the
+        # circuit breaker in `fetch_bars` decide whether to keep trying.
+        adapter = requests.adapters.HTTPAdapter(max_retries=0)
+        self.session.mount("https://", adapter)
+        self.session.mount("http://", adapter)
         self._verified = False
 
     def _solve_challenge(self, body: str) -> bool:
@@ -88,7 +96,7 @@ class StooqSource:
         return True
 
     def fetch(self, ticker: str, start: str | None = None, end: str | None = None) -> pd.DataFrame:
-        params = {"s": f"{ticker.lower()}.us", "i": "d"}
+        params = {"s": f"{to_stooq_symbol(ticker)}.us", "i": "d"}
         if start:
             params["d1"] = pd.Timestamp(start).strftime("%Y%m%d")
         if end:
@@ -169,7 +177,7 @@ class YahooSource:
             else datetime.now(tz=timezone.utc).timestamp()
         )
         resp = self._get(
-            f"{self.base}/{ticker.upper()}",
+            f"{self.base}/{to_yahoo_symbol(ticker)}",
             {"period1": period1, "period2": period2, "interval": "1d", "events": "div,split"},
         )
         payload = json.loads(resp.text)
@@ -205,24 +213,56 @@ class YahooSource:
 SOURCES = {"stooq": StooqSource, "yahoo": YahooSource}
 
 
+#: Consecutive failures after which a source is skipped for the rest of the run.
+CIRCUIT_BREAKER_THRESHOLD = 5
+_consecutive_failures: dict[str, int] = {}
+
+
+def reset_circuit_breakers() -> None:
+    """Forget past failures - used by tests and by long-lived processes."""
+    _consecutive_failures.clear()
+
+
+def _source_is_open(name: str) -> bool:
+    return _consecutive_failures.get(name, 0) < CIRCUIT_BREAKER_THRESHOLD
+
+
 def fetch_bars(
     ticker: str,
     source: str = "auto",
     start: str | None = None,
     end: str | None = None,
 ) -> Bars:
+    """Fetch one ticker, trying each configured source in order.
+
+    Under ``auto`` a source that has failed :data:`CIRCUIT_BREAKER_THRESHOLD`
+    times consecutively is skipped for the rest of the process. Without it, a
+    500-name load against a source that is blocking us pays a full timeout on
+    every ticker - which is the difference between a ten-minute load and a
+    four-hour one.
+    """
     order = ["stooq", "yahoo"] if source == "auto" else [source]
+    if source == "auto":
+        live = [name for name in order if _source_is_open(name)]
+        order = live or order[-1:]
     errors: list[str] = []
     for name in order:
         try:
             frame = SOURCES[name]().fetch(ticker, start=start, end=end)
             if frame.empty:
                 raise DataSourceError(f"{name} returned an empty frame for {ticker}")
+            _consecutive_failures[name] = 0
             log.info("fetched %s bars for %s from %s", len(frame), ticker, name)
             return Bars(ticker=ticker.upper(), frame=frame, source=name)
         except Exception as exc:  # noqa: BLE001 - try the next source
+            _consecutive_failures[name] = _consecutive_failures.get(name, 0) + 1
             errors.append(f"{name}: {exc}")
             log.warning("source %s failed for %s (%s)", name, ticker, exc)
+            if _consecutive_failures[name] == CIRCUIT_BREAKER_THRESHOLD:
+                log.warning(
+                    "source %s failed %d times in a row; skipping it for the rest "
+                    "of this run", name, CIRCUIT_BREAKER_THRESHOLD,
+                )
     raise DataSourceError(f"all sources failed for {ticker} -> {errors}")
 
 
@@ -232,20 +272,45 @@ def load_universe(
     source: str = "auto",
     start: str | None = None,
     end: str | None = None,
+    pause: float = 0.0,
+    skip_existing: bool = False,
+    on_error: str = "warn",
 ) -> pd.DataFrame:
-    """Fetch every ticker and write it to ``stooq.daily``. Returns a load report."""
+    """Fetch every ticker and write it to ``stooq.daily``. Returns a load report.
+
+    ``on_error='warn'`` keeps going when a symbol cannot be fetched, which is
+    what a 500-name load needs: a handful of tickers are always delisted,
+    renamed, or simply absent upstream, and one of them should not abort the
+    other 499.
+    """
     client.create_table()
+    existing: set[str] = set()
+    if skip_existing:
+        coverage = client.coverage()
+        if not coverage.empty:
+            existing = {str(t) for t in coverage["ticker"]}
     rows = []
-    for ticker in tickers:
-        bars = fetch_bars(ticker, source=source, start=start, end=end)
-        inserted = client.insert_bars(bars.frame)
-        rows.append(
-            {
-                "ticker": bars.ticker,
-                "source": bars.source,
-                "rows": inserted,
-                "first_bar": bars.frame["date"].min(),
-                "last_bar": bars.frame["date"].max(),
-            }
-        )
+    total = len(tickers)
+    for i, ticker in enumerate(tickers, start=1):
+        symbol = ticker.strip().upper()
+        if symbol in existing:
+            rows.append({"ticker": symbol, "source": "cached", "rows": 0,
+                         "first_bar": None, "last_bar": None, "error": ""})
+            continue
+        try:
+            bars = fetch_bars(symbol, source=source, start=start, end=end)
+            inserted = client.insert_bars(bars.frame)
+            rows.append({"ticker": bars.ticker, "source": bars.source, "rows": inserted,
+                         "first_bar": bars.frame["date"].min(),
+                         "last_bar": bars.frame["date"].max(), "error": ""})
+        except Exception as exc:  # noqa: BLE001
+            if on_error == "raise":
+                raise
+            log.warning("[%d/%d] %s failed: %s", i, total, symbol, exc)
+            rows.append({"ticker": symbol, "source": "", "rows": 0,
+                         "first_bar": None, "last_bar": None, "error": str(exc)[:160]})
+        if i % 25 == 0:
+            log.info("[%d/%d] loaded", i, total)
+        if pause:
+            time.sleep(pause)
     return pd.DataFrame(rows)

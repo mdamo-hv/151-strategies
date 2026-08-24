@@ -198,3 +198,108 @@ def test_single_name_weights_are_finite_and_bounded(key, panel: Panel):
     gross = strategy.weights(single).abs().sum(axis=1)
     assert np.isfinite(gross.to_numpy()).all()
     assert (gross <= 1.0 + 1e-9).all()
+
+
+def _state_machine_reference(enter_long, exit_long, enter_short, exit_short):
+    """The original per-name loop, kept as the oracle for the vectorised version."""
+    out = np.zeros(enter_long.shape)
+    el, xl = enter_long.to_numpy(), exit_long.to_numpy()
+    es, xs = enter_short.to_numpy(), exit_short.to_numpy()
+    for col in range(enter_long.shape[1]):
+        current = 0.0
+        for row in range(enter_long.shape[0]):
+            if el[row, col]:
+                current = 1.0
+            elif es[row, col]:
+                current = -1.0
+            elif current > 0 and xl[row, col]:
+                current = 0.0
+            elif current < 0 and xs[row, col]:
+                current = 0.0
+            out[row, col] = current
+    return pd.DataFrame(out, index=enter_long.index, columns=enter_long.columns)
+
+
+@pytest.mark.parametrize("trial", range(6))
+def test_vectorised_state_machine_matches_the_reference_loop(trial):
+    """The cross-section advances together; that must not change any decision.
+
+    Entries beat exits on the same bar and a long entry beats a short entry -
+    precedence that is easy to get subtly wrong when the per-name loop is
+    replaced by masks.
+    """
+    from strategies151.strategies.technical import _run_state_machine
+
+    rng = np.random.default_rng(trial)
+    columns = list("ABCDEFGHI")
+    rates = rng.uniform(0.02, 0.35, 4)
+    frames = [pd.DataFrame(rng.random((400, len(columns))) < rate, columns=columns)
+              for rate in rates]
+    pd.testing.assert_frame_equal(_run_state_machine(*frames), _state_machine_reference(*frames))
+
+
+def test_state_machine_holds_a_position_until_its_own_exit():
+    from strategies151.strategies.technical import _run_state_machine
+
+    n = 6
+    off = pd.DataFrame(False, index=range(n), columns=["A"])
+    enter_long = off.copy()
+    enter_long.loc[1, "A"] = True
+    exit_long = off.copy()
+    exit_long.loc[4, "A"] = True
+    state = _run_state_machine(enter_long, exit_long, off, off)["A"].tolist()
+    assert state == [0.0, 1.0, 1.0, 1.0, 0.0, 0.0]
+
+
+def test_state_machine_lets_a_long_entry_win_the_bar():
+    from strategies151.strategies.technical import _run_state_machine
+
+    on = pd.DataFrame(True, index=range(2), columns=["A"])
+    off = pd.DataFrame(False, index=range(2), columns=["A"])
+    assert _run_state_machine(on, off, on, off)["A"].tolist() == [1.0, 1.0]
+
+
+def test_safe_inverse_handles_a_singular_covariance():
+    """T <= N makes the sample covariance singular - footnote 62 of the paper.
+
+    A 252-day training window against a 437-name universe is always in this
+    regime, and inverting it anyway produces enormous weights along near-null
+    eigenvectors, which in-sample tuning then prefers because they fit the
+    training window almost perfectly.
+    """
+    from strategies151.strategies.optimization import _safe_inverse
+
+    rng = np.random.default_rng(0)
+    observations, assets = 60, 100          # fewer observations than assets
+    returns = rng.normal(size=(observations, assets))
+    cov = np.cov(returns, rowvar=False)
+    assert np.linalg.matrix_rank(cov) < assets      # genuinely singular
+
+    inverse = _safe_inverse(cov)
+    assert np.isfinite(inverse).all()
+    assert np.linalg.cond(inverse) < 1e12
+
+
+def test_safe_inverse_leaves_a_well_conditioned_matrix_alone():
+    from strategies151.strategies.optimization import _safe_inverse
+
+    rng = np.random.default_rng(1)
+    cov = np.cov(rng.normal(size=(2000, 8)), rowvar=False)
+    pd.testing.assert_frame_equal(
+        pd.DataFrame(_safe_inverse(cov)), pd.DataFrame(np.linalg.inv(cov)), atol=1e-8
+    )
+
+
+def test_stat_arb_weights_stay_bounded_on_a_wide_universe(panel: Panel):
+    """Gross exposure must stay at 1 even when the covariance is rank-deficient."""
+    wide = Panel(**{f: pd.concat([getattr(panel, f)] * 12, axis=1) for f in
+                    ("open", "high", "low", "close", "volume")})
+    wide = Panel(**{f: getattr(wide, f).set_axis(
+        [f"N{i}" for i in range(getattr(wide, f).shape[1])], axis=1) for f in
+        ("open", "high", "low", "close", "volume")})
+    strategy = build("3.18.stat_arb_optimization")
+    train = wide.slice(0, 252)          # 252 observations, 72 assets
+    strategy.fit(train, context=train)
+    weights = strategy.weights(wide.slice(0, 400))
+    assert np.isfinite(weights.to_numpy()).all()
+    assert (weights.abs().sum(axis=1) <= 1.0 + 1e-9).all()
