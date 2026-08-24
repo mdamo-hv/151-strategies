@@ -296,6 +296,28 @@ def cmd_backtest(args, cfg: Config) -> int:
     return 0
 
 
+
+def _per_ticker_worker(payload):
+    """Run one ticker in a worker process.
+
+    Each ticker is an independent one-name study, so the loop parallelises
+    cleanly. Only that ticker's slice of the panel is shipped to the worker -
+    sending the whole 437-name panel to every process would cost more in
+    pickling than the study itself.
+    """
+    ticker, single, cfg, keys, draws, block = payload
+    return run_ticker_study(
+        ticker, single, cfg, strategy_keys=keys,
+        bootstrap_draws=draws, bootstrap_block=block,
+    )
+
+
+def _single_ticker_panel(panel, ticker: str):
+    from strategies151.data.panel import FIELDS, Panel
+
+    return Panel(**{f: getattr(panel, f)[[ticker]] for f in FIELDS})
+
+
 def cmd_per_ticker(args, cfg: Config) -> int:
     """Find the best strategy for each ticker individually and chart it."""
     tickers = _sp500_tickers() if args.sp500 else args.tickers
@@ -322,13 +344,31 @@ def cmd_per_ticker(args, cfg: Config) -> int:
     output_dir.mkdir(parents=True, exist_ok=True)
     log.info("writing per-ticker study to %s", output_dir)
 
+    payloads = [
+        (t, _single_ticker_panel(panel, t), cfg, args.strategies,
+         args.bootstrap_draws, args.bootstrap_block)
+        for t in panel.tickers
+    ]
+    jobs = max(1, args.jobs)
+    log.info(
+        "%d tickers, %s", len(payloads),
+        f"{jobs} worker processes" if jobs > 1 else "one process",
+    )
+
+    if jobs > 1:
+        from concurrent.futures import ProcessPoolExecutor
+
+        with ProcessPoolExecutor(max_workers=jobs) as pool:
+            produced = list(pool.map(_per_ticker_worker, payloads, chunksize=1))
+    else:
+        produced = (_per_ticker_worker(payload) for payload in payloads)
+
     studies = []
-    for ticker in panel.tickers:
-        study = run_ticker_study(
-            ticker, panel, cfg, strategy_keys=args.strategies,
-            bootstrap_draws=args.bootstrap_draws, bootstrap_block=args.bootstrap_block,
-        )
+    for done, study in enumerate(produced, start=1):
+        ticker = study.ticker
         studies.append(study)
+        if jobs > 1 or done % 25 == 0:
+            log.info("[%d/%d] %s", done, len(payloads), ticker)
         if study.best is None:
             log.info("%-6s no applicable strategy on a one-name universe", ticker)
         else:
@@ -679,6 +719,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_pt.add_argument("--cost-bps", type=float)
     p_pt.add_argument("--output", help="root directory (default: data/)")
     p_pt.add_argument("--stamp", help="folder name (default: YYYYMMDDHHMM)")
+    p_pt.add_argument(
+        "-j", "--jobs", type=int, default=1,
+        help="worker processes; each ticker is independent, so this scales "
+             "almost linearly with cores (default: 1)",
+    )
     p_pt.add_argument("--bootstrap-draws", type=int, default=5000)
     p_pt.add_argument("--bootstrap-block", type=float, default=10.0)
     p_pt.set_defaults(func=cmd_per_ticker)

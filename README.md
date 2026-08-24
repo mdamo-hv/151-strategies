@@ -35,7 +35,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
 
 ./.venv/bin/s151 load --sp500               # the whole index
 ./.venv/bin/s151 backtest --sp500 --output results_sp500
-./.venv/bin/s151 per-ticker --sp500 --sample 12 --output data_sp500
+./.venv/bin/s151 per-ticker --sp500 -j 8 --output data_sp500   # all 500, ~3h on 8 cores
 ```
 
 Everything is configured in [`configs/default.yaml`](configs/default.yaml);
@@ -516,6 +516,99 @@ study gave, on a different and larger sample.
 Neither is fixable without a point-in-time membership file. Both are recorded in
 `results_sp500/run_context.json` so they travel with the numbers.
 
+
+## Running the full 500 locally
+
+### 0. Prerequisites
+
+Docker (for QuestDB) and Python 3.10+. Nothing else.
+
+```bash
+git clone https://github.com/mdamo-hv/151-strategies.git
+cd 151-strategies
+./scripts/bootstrap.sh          # QuestDB container + venv + install + load bars
+```
+
+`bootstrap.sh` loads only the six-name universe. For the index, replace its last
+step:
+
+```bash
+docker compose up -d questdb
+python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
+./.venv/bin/s151 load --sp500                 # ~8 min, 503 tickers
+./.venv/bin/s151 status                       # confirm what landed
+```
+
+### 1. The cross-sectional study — all 500 names
+
+```bash
+./.venv/bin/s151 backtest --sp500 --output results_sp500
+```
+
+**~70 minutes** on 8 cores. This is the one that matters: all 28 strategies over
+the whole cross-section, 125 walk-forward folds, plus the joint significance
+test. Artifacts land in `results_sp500/`.
+
+To iterate faster, restrict the strategy set — 3.17 alone is half the runtime:
+
+```bash
+./.venv/bin/s151 backtest --sp500 --output results_sp500 \
+  --strategies 4.1.2.dual_momentum 6.5.volatility_targeting 3.9.mean_reversion_single_cluster
+```
+
+### 2. Best strategy per ticker — all 500 names
+
+Each ticker is an independent one-name study, so this parallelises almost
+linearly. Use `-j`:
+
+```bash
+./.venv/bin/s151 per-ticker --sp500 -j 8 --output data_sp500
+```
+
+| Cores | Wall clock |
+|---|---|
+| 1 | ~25 hours |
+| 8 | ~3 hours |
+| 16 | ~1.5 hours |
+
+Roughly 3 minutes per ticker per core; measured 133s → 38s on four tickers with
+four workers, producing byte-identical results (`tests/test_perticker.py`
+pins that). Leave a core free — `-j $(( $(nproc) - 1 ))` — or the machine will
+be unusable while it runs.
+
+Sanity-check the plumbing on a handful of names first:
+
+```bash
+./.venv/bin/s151 per-ticker --sp500 --sample 12 -j 8 --output data_sp500
+```
+
+Each run writes 500 PNG research cards plus per-ticker CSVs — about **500 MB**.
+
+### 3. Re-run the significance tests without re-running anything
+
+The per-strategy daily return series are persisted, so the statistics can be
+redone with more bootstrap draws or a different block length in seconds:
+
+```bash
+./.venv/bin/s151 significance data_sp500/<stamp> --draws 20000 --block 20
+```
+
+### Notes
+
+* **Memory.** The 437-name panel is ~65 MB; each worker gets only its own
+  ticker's slice, so `-j 8` stays well under 4 GB.
+* **Resuming.** There is no checkpointing. If a 500-name per-ticker run is
+  interrupted, split it: `--tickers $(sed -n '2,251p' configs/sp500.csv | cut -d, -f1)`
+  and again for the second half, into the same `--stamp`.
+* **A different index.** `--sp500` is a convenience wrapper over
+  `configs/sp500.csv`. Any ticker list works: `--tickers AAPL MSFT ...`, or
+  point `configs/sp500.csv` at your own membership file.
+* **Data source.** stooq is tried first and Yahoo is the fallback; from a
+  network stooq will serve, `s151 load` uses genuine stooq bars with no code
+  change. A source that fails five times in a row is skipped for the rest of the
+  run.
+
+
 ---
 
 ## What is implemented, and what is not
@@ -623,7 +716,7 @@ src/strategies151/
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
     charts.py             research cards and the per-ticker summary chart
-tests/                    288 tests: causality, attribution, test calibration
+tests/                    290 tests: causality, attribution, test calibration
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an
