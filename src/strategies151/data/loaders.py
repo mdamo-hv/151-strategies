@@ -286,6 +286,11 @@ def load_universe(
     other 499.
     """
     client.create_table()
+<<<<<<< HEAD
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
     client.verify_schema()
     log.info("QuestDB: %s", client.build_version())
     if client.cfg.read_only:
@@ -294,6 +299,10 @@ def load_universe(
         log.info("%s is read-only; reporting coverage instead of loading",
                  client.cfg.table)
         skip_existing = True
+<<<<<<< HEAD
+=======
+>>>>>>> Stashed changes
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
     existing: set[str] = set()
     if skip_existing:
         coverage = client.coverage()

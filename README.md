@@ -620,6 +620,11 @@ redone with more bootstrap draws or a different block length in seconds:
 ./.venv/bin/s151 significance data_sp500/<stamp> --draws 20000 --block 20
 ```
 
+<<<<<<< HEAD
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
 ### If every ticker fails with `not a timestamp 'date'`
 
 ```
@@ -679,6 +684,10 @@ To load bars yourself instead, point `table` at a name this project owns, set
 `QUESTDB_TABLE`, `QUESTDB_TICKER_COLUMN`, `QUESTDB_DATE_COLUMN`,
 `QUESTDB_READ_ONLY`.
 
+<<<<<<< HEAD
+=======
+>>>>>>> Stashed changes
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
 ### If a documented flag is "unrecognized"
 
 ```

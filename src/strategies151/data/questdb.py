@@ -85,6 +85,11 @@ class QuestDBClient:
         self._refuse_if_read_only("drop")
         self.exec(f"DROP TABLE IF EXISTS {self.cfg.quoted_table}")
 
+<<<<<<< HEAD
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
     def verify_schema(self) -> None:
         """Fail loudly if an existing table cannot receive - or serve - bars.
 
@@ -148,6 +153,10 @@ class QuestDBClient:
         date = next((c for c, t in types.items() if t == "TIMESTAMP"), "?")
         return f"ticker_column: {ticker}, date_column: {date}"
 
+<<<<<<< HEAD
+=======
+>>>>>>> Stashed changes
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
     # --------------------------------------------------------------- writes --
     def insert_bars(self, bars: pd.DataFrame) -> int:
         """Bulk-insert OHLCV rows. ``bars`` must carry :data:`OHLCV_COLUMNS`."""
@@ -159,6 +168,13 @@ class QuestDBClient:
         frame = frame.dropna(subset=["ticker", "date", "close"])
         if frame.empty:
             return 0
+<<<<<<< HEAD
+=======
+<<<<<<< Updated upstream
+        frame["date"] = pd.to_datetime(frame["date"], utc=True).dt.strftime(
+            "%Y-%m-%dT%H:%M:%S.%fZ"
+=======
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
         timestamps = pd.to_datetime(frame["date"], utc=True)
         ticker_col, date_col = self.cfg.ticker_column, self.cfg.date_column
         frame["ticker"] = frame["ticker"].map(to_db_symbol)
@@ -200,6 +216,10 @@ class QuestDBClient:
         raise QuestDBError(
             "/imp rejected every timestamp format this client knows "
             f"(QuestDB {self.build_version()}): {errors}"
+<<<<<<< HEAD
+=======
+>>>>>>> Stashed changes
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
         )
 
     #: Tried in order until one is accepted, then remembered. Daily bars have no

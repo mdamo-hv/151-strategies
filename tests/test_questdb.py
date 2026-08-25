@@ -83,6 +83,11 @@ def test_coverage_reports_ranges(client):
     coverage = client.coverage()
     assert set(coverage.columns) == {"ticker", "bars", "first_bar", "last_bar"}
     assert len(coverage) >= 2
+<<<<<<< HEAD
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
 
 
 def test_insert_negotiates_a_timestamp_format(client):
@@ -175,3 +180,7 @@ def test_read_only_tables_are_never_written_or_dropped(client):
         guarded.drop_table()
     guarded.create_table()  # a no-op, not an error: the table already exists
     assert client.read_bars(["AAA"]) is not None
+<<<<<<< HEAD
+=======
+>>>>>>> Stashed changes
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
