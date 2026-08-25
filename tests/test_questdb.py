@@ -17,7 +17,9 @@ pytestmark = pytest.mark.integration
 @pytest.fixture(scope="module")
 def client():
     cfg = Config.load().questdb
-    cfg = replace(cfg, table="stooq.daily_pytest")
+    # A scratch table this project owns: writable, and named with whatever
+    # column vocabulary the config asks for.
+    cfg = replace(cfg, table="stooq.daily_pytest", read_only=False)
     client = QuestDBClient(cfg)
     if not client.ping():
         pytest.skip(f"no QuestDB at {cfg.http_url}")
@@ -113,8 +115,12 @@ def test_verify_schema_rejects_a_wrongly_typed_table(client):
     from strategies151.data.questdb import QuestDBError
 
     table = "stooq.wrongtype_pytest"
+    ticker_col, date_col = client.cfg.ticker_column, client.cfg.date_column
     client.exec(f"DROP TABLE IF EXISTS '{table}'")
-    client.exec(f"CREATE TABLE '{table}' (ticker SYMBOL, date STRING, close DOUBLE)")
+    client.exec(
+        f"CREATE TABLE '{table}' "
+        f"({ticker_col} SYMBOL, {date_col} STRING, close DOUBLE)"
+    )
     from dataclasses import replace as dc_replace
 
     other = QuestDBClient(dc_replace(client.cfg, table=table))
@@ -131,3 +137,41 @@ def test_verify_schema_accepts_the_real_table(client):
 
 def test_build_version_is_readable(client):
     assert "QuestDB" in client.build_version()
+
+
+def test_verify_schema_points_at_the_right_column_names(client):
+    """A foreign table is a config problem, not a reason to drop it."""
+    from strategies151.data.questdb import QuestDBError
+
+    table = "stooq.foreign_pytest"
+    client.exec(f"DROP TABLE IF EXISTS '{table}'")
+    client.exec(
+        f"CREATE TABLE '{table}' (symbol SYMBOL, ts TIMESTAMP, open DOUBLE, "
+        "high DOUBLE, low DOUBLE, close DOUBLE, volume DOUBLE) TIMESTAMP(ts)"
+    )
+    other = QuestDBClient(replace(client.cfg, table=table, date_column="nope"))
+    try:
+        with pytest.raises(QuestDBError, match="ticker_column: symbol, date_column: ts"):
+            other.verify_schema()
+    finally:
+        client.exec(f"DROP TABLE IF EXISTS '{table}'")
+
+
+def test_read_only_tables_are_never_written_or_dropped(client):
+    """The shared bar table must survive a stray `s151 load`."""
+    from strategies151.data.questdb import QuestDBError
+
+    guarded = QuestDBClient(replace(client.cfg, read_only=True))
+    bars = pd.DataFrame(
+        {
+            "ticker": ["AAA"], "date": pd.to_datetime(["2024-01-02"]),
+            "open": [1.0], "high": [1.0], "low": [1.0], "close": [1.0],
+            "volume": [1.0],
+        }
+    )
+    with pytest.raises(QuestDBError, match="read-only"):
+        guarded.insert_bars(bars)
+    with pytest.raises(QuestDBError, match="read-only"):
+        guarded.drop_table()
+    guarded.create_table()  # a no-op, not an error: the table already exists
+    assert client.read_bars(["AAA"]) is not None

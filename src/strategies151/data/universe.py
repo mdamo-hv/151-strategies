@@ -83,6 +83,16 @@ def to_yahoo_symbol(ticker: str) -> str:
     return ticker.strip().upper().replace(".", "-")
 
 
+def to_db_symbol(ticker: str) -> str:
+    """``brk.b`` -> ``BRK-B``: the spelling the bar table stores.
+
+    The table is filled from stooq, which hyphenates share classes, while index
+    membership lists write ``BRK.B``. Normalising at the database boundary keeps
+    one spelling of a name across loads, reads and the panel.
+    """
+    return ticker.strip().upper().replace(".", "-")
+
+
 def to_stooq_symbol(ticker: str) -> str:
     """``BRK.B`` -> ``brk-b``; stooq also hyphenates share classes."""
     return ticker.strip().lower().replace(".", "-")

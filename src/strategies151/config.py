@@ -22,6 +22,17 @@ class QuestDBConfig:
     password: str = "quest"
     database: str = "qdb"
     table: str = "stooq.daily"
+    #: Column names inside ``table``. The research code always speaks
+    #: ``ticker``/``date``; these map that vocabulary onto whatever an existing
+    #: table uses, so a shared bar table written by another loader (the finance
+    #: repo's stooq ingest writes ``symbol``/``timestamp``) can be read in place
+    #: instead of being dropped and reloaded.
+    ticker_column: str = "ticker"
+    date_column: str = "date"
+    #: ``True`` when ``table`` is owned by another loader. Writes and DDL are
+    #: refused, because this client only knows the OHLCV subset of such a table
+    #: and a DEDUP upsert would null out the columns it does not send.
+    read_only: bool = False
 
     @property
     def http_url(self) -> str:
@@ -97,7 +108,8 @@ class Config:
         """Environment wins over the file, so CI/containers can retarget QuestDB."""
         qdb = self.questdb
         env = os.environ
-        qdb = QuestDBConfig(
+        qdb = replace(
+            qdb,
             host=env.get("QUESTDB_HOST", qdb.host),
             http_port=int(env.get("QUESTDB_HTTP_PORT", qdb.http_port)),
             pg_port=int(env.get("QUESTDB_PG_PORT", qdb.pg_port)),
@@ -105,5 +117,9 @@ class Config:
             password=env.get("QUESTDB_PASSWORD", qdb.password),
             database=env.get("QUESTDB_DATABASE", qdb.database),
             table=env.get("QUESTDB_TABLE", qdb.table),
+            ticker_column=env.get("QUESTDB_TICKER_COLUMN", qdb.ticker_column),
+            date_column=env.get("QUESTDB_DATE_COLUMN", qdb.date_column),
+            read_only=env.get("QUESTDB_READ_ONLY", str(qdb.read_only)).lower()
+            in ("1", "true", "yes"),
         )
         return replace(self, questdb=qdb)
