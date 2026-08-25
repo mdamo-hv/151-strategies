@@ -11,6 +11,7 @@ import pandas as pd
 
 from strategies151.config import Config
 from strategies151.data.questdb import QuestDBClient
+from strategies151.data.universe import to_db_symbol
 
 log = logging.getLogger(__name__)
 
@@ -144,6 +145,9 @@ def load_panel(
 ) -> Panel:
     client = client or QuestDBClient(cfg.questdb)
     wanted = list(tickers) if tickers is not None else list(cfg.universe.tickers)
+    # The table's spelling is the identity used from here on: read_bars returns
+    # BRK-B, so a requested BRK.B must be normalised or it drops out of the panel.
+    wanted = [to_db_symbol(t) for t in wanted]
     frame = client.read_bars(wanted, cfg.universe.start, cfg.universe.end)
     if frame.empty:
         raise RuntimeError(

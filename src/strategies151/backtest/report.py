@@ -79,12 +79,21 @@ def ticker_attribution(
     return pd.concat(frames, ignore_index=True)
 
 
-def universe_attribution(attribution: pd.DataFrame) -> pd.DataFrame:
+def universe_attribution(
+    attribution: pd.DataFrame,
+    performance: pd.DataFrame | None = None,
+) -> pd.DataFrame:
     """How each ticker contributed across every strategy in the study.
 
     Averaged, not summed: the strategies are alternatives rather than a
     portfolio, so the mean contribution answers "which names did the library as
     a whole make or lose money on".
+
+    Passing ``performance`` (from :func:`ticker_performance`) adds the
+    buy-and-hold benchmark for each name, so the table answers the follow-up
+    question: did trading the ticker beat simply owning it? Contributions are
+    scaled by exposure before the comparison - see
+    :func:`_add_buy_and_hold_comparison`.
     """
     if attribution.empty:
         return pd.DataFrame()
@@ -102,7 +111,65 @@ def universe_attribution(attribution: pd.DataFrame) -> pd.DataFrame:
         )
         .reset_index()
     )
+    grouped = _add_buy_and_hold_comparison(grouped, performance)
     return grouped.sort_values("mean_contribution_ann_pct", ascending=False).reset_index(drop=True)
+
+
+def _add_buy_and_hold_comparison(
+    grouped: pd.DataFrame,
+    performance: pd.DataFrame | None,
+) -> pd.DataFrame:
+    """Put each ticker's contribution next to its own buy-and-hold return.
+
+    The raw contribution is not comparable to buy and hold: a strategy holding
+    0.25% of capital in a name earns 0.25% of that name's move, so every
+    contribution looks tiny next to a benchmark that is fully invested. Dividing
+    by the average gross weight rescales it to *return per unit of exposure* -
+    what the strategy earned on the capital it actually committed to the name.
+    For a strategy that just holds the ticker the two coincide, which is what
+    makes ``edge_vs_buy_hold_pct`` readable: positive means the timing added
+    value over owning the name outright, negative means it did not.
+
+    Buy and hold uses ``ann_return`` (arithmetic) rather than ``cagr`` so it is
+    annualised the same way the contributions are.
+    """
+    if performance is None or performance.empty or "ann_return" not in performance.columns:
+        return grouped
+    weights = grouped["avg_gross_weight"].astype(float)
+    per_unit = grouped["mean_contribution_ann_pct"].astype(float) / weights.where(weights > 1e-12)
+    buy_hold = (
+        grouped["ticker"]
+        .map(performance.set_index("ticker")["ann_return"].astype(float))
+        .astype(float)
+        * 100
+    )
+    grouped["buy_hold_ann_pct"] = buy_hold
+    grouped["per_unit_contribution_ann_pct"] = per_unit
+    grouped["edge_vs_buy_hold_pct"] = per_unit - buy_hold
+    return grouped
+
+
+UNIVERSE_DISPLAY_DECIMALS = {
+    "avg_gross_weight": 4,
+    "avg_net_weight": 4,
+}
+
+
+def format_universe_attribution(universe: pd.DataFrame) -> pd.DataFrame:
+    """Presentation view of :func:`universe_attribution`.
+
+    Weights are a few tenths of a percent on a wide universe, so they need more
+    than the two decimals the percentage columns use or they all print as
+    ``0.00``.
+    """
+    if universe.empty:
+        return universe
+    out = universe.copy()
+    for column in out.columns:
+        if out[column].dtype.kind not in "fc":
+            continue
+        out[column] = out[column].round(UNIVERSE_DISPLAY_DECIMALS.get(column, 2))
+    return out
 
 
 def format_ticker_performance(performance: pd.DataFrame) -> pd.DataFrame:
@@ -142,17 +209,21 @@ def write_results(
     paths["leaderboard"] = output_dir / "leaderboard.csv"
     board.to_csv(paths["leaderboard"], index=False)
 
+    index = results[0].daily.index if results else None
+    performance = ticker_performance(panel, index=index) if panel is not None else None
+
     attribution = ticker_attribution(results)
     if not attribution.empty:
         paths["ticker_attribution"] = output_dir / "ticker_attribution.csv"
         attribution.to_csv(paths["ticker_attribution"], index=False)
         paths["universe_attribution"] = output_dir / "ticker_universe_attribution.csv"
-        universe_attribution(attribution).to_csv(paths["universe_attribution"], index=False)
+        universe_attribution(attribution, performance).to_csv(
+            paths["universe_attribution"], index=False
+        )
 
-    if panel is not None:
-        index = results[0].daily.index if results else None
+    if performance is not None:
         paths["ticker_performance"] = output_dir / "ticker_performance.csv"
-        ticker_performance(panel, index=index).to_csv(paths["ticker_performance"], index=False)
+        performance.to_csv(paths["ticker_performance"], index=False)
 
     if per_ticker_daily:
         # ~300 KB per strategy, so this is opt-in rather than always written.
@@ -191,11 +262,6 @@ def write_results(
         paths["context"].write_text(json.dumps(context, indent=2, default=str))
 
     paths["summary"] = output_dir / "summary.md"
-    performance = (
-        ticker_performance(panel, index=results[0].daily.index if results else None)
-        if panel is not None
-        else None
-    )
     paths["summary"].write_text(
         markdown_summary(board, context, performance=performance, attribution=attribution)
     )
@@ -288,7 +354,7 @@ def markdown_summary(
         ]
 
     if attribution is not None and not attribution.empty:
-        universe = universe_attribution(attribution)
+        universe = universe_attribution(attribution, performance)
         if not universe.empty:
             lines += [
                 "## Which tickers the strategies made money on",
@@ -298,7 +364,22 @@ def markdown_summary(
                 "additive, so a strategy's per-ticker contributions sum to its "
                 "annualised return.",
                 "",
-                universe.round(2).to_markdown(index=False),
+            ]
+            if "buy_hold_ann_pct" in universe.columns:
+                lines += [
+                    "`mean_contribution_ann_pct` is small because it is scaled "
+                    "by position size: a name held at 0.25% of capital returns "
+                    "0.25% of its own move. "
+                    "`per_unit_contribution_ann_pct` divides that back out to "
+                    "the return earned per unit of exposure, which is what "
+                    "`buy_hold_ann_pct` - the name's own annualised return over "
+                    "the same window - can be compared against. "
+                    "`edge_vs_buy_hold_pct` is the difference: positive means "
+                    "trading the name beat owning it.",
+                    "",
+                ]
+            lines += [
+                format_universe_attribution(universe).to_markdown(index=False),
                 "",
                 "Per-strategy detail is in `ticker_attribution.csv`.",
                 "",

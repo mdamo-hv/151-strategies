@@ -9,6 +9,10 @@ forward across the whole history.
 Bars come from the QuestDB table **`stooq.daily`**. The study universe is
 `NVDA, TSLA, MSFT, AMZN, WMT, JPM`.
 
+The shipped config points at the shared `us01` bar table, which another loader
+owns and fills — see **Reusing a shared bar table**. Nothing needs downloading
+there; `s151 load` only reports what is already covered.
+
 ---
 
 ## Quick start
@@ -221,6 +225,29 @@ Rolled up across the whole library (`ticker_universe_attribution.csv`):
 | JPM | +0.20% | +3.56% | -4.14% | 57% | 0.15 | +0.05 |
 | AMZN | +0.10% | +5.43% | -7.55% | 54% | 0.15 | +0.04 |
 | WMT | -0.35% | +6.66% | -3.92% | 36% | 0.17 | +0.07 |
+
+**Did trading the name beat owning it?** The contribution column above cannot be
+compared to the buy-and-hold table directly, because it is scaled by position
+size: a name held at 0.25% of capital earns 0.25% of its own move, so every
+contribution looks tiny next to a benchmark that is fully invested. When a
+`panel` is available the roll-up therefore carries three more columns:
+
+| Column | Meaning |
+|---|---|
+| `buy_hold_ann_pct` | the ticker's own annualised return over the same out-of-sample window |
+| `per_unit_contribution_ann_pct` | mean contribution divided by average gross weight — the return the library earned per unit of capital it actually committed to the name |
+| `edge_vs_buy_hold_pct` | the difference; positive means trading the name beat owning it |
+
+Buy and hold is annualised arithmetically (`mean * 252`, the `ann_return`
+column, not `cagr`) so it matches how the contributions are annualised. The
+rescaling is exact rather than indicative: for an equal-weight buy-and-hold
+"strategy" the per-unit figure reproduces the name's own return to within its
+rebalancing cost, which `tests/test_attribution.py` pins to machine precision.
+Two caveats when reading `edge_vs_buy_hold_pct`: contributions are net of costs
+while the benchmark is a costless paper return, and the per-unit ratio divides
+two averages taken across the library, so a single outlier strategy can carry a
+name's whole edge — check `best_contribution_ann_pct` against
+`profitable_strategies_pct` before believing it.
 
 For a single strategy, e.g. 4.1 momentum rotation:
 
@@ -593,6 +620,68 @@ redone with more bootstrap draws or a different block length in seconds:
 ./.venv/bin/s151 significance data_sp500/<stamp> --draws 20000 --block 20
 ```
 
+<<<<<<< Updated upstream
+=======
+### If every ticker fails with `not a timestamp 'date'`
+
+```
+[1/503] MMM failed: /imp rejected the batch: {'status': "not a timestamp 'date'"}
+```
+
+QuestDB did not recognise the `date` column as a timestamp. Two causes:
+
+1. **An older QuestDB build.** The microsecond pattern token `SSSUUU` is a
+   recent addition; an older server fails to parse it, treats the column as
+   text, and rejects every batch. The client now negotiates the format,
+   starting with the plain `yyyy-MM-dd` that every version accepts, and
+   remembers the one that worked. Update with `git pull` if you see this.
+2. **A pre-existing table with the wrong types.** `/imp` uses the *existing*
+   table's column types and ignores the schema it is handed, so a `stooq.daily`
+   created earlier by another tool rejects everything regardless. `s151 load`
+   checks this up front. If the date column really is mistyped, drop and reload
+   a table **this project owns**:
+
+   ```bash
+   curl -G http://localhost:9000/exec --data-urlencode "query=DROP TABLE 'stooq.daily'"
+   ./.venv/bin/s151 load --sp500
+   ```
+
+   If instead the table merely *names* its columns differently, nothing is
+   broken and nothing should be dropped — point the config at the names it
+   uses (see **Reusing a shared bar table** below).
+
+`s151 load` logs the server build on startup, so the version is in your log.
+
+### Reusing a shared bar table
+
+The bar table does not have to be one this project loaded. `configs/default.yaml`
+maps the research vocabulary onto whatever an existing table uses:
+
+```yaml
+questdb:
+  host: us01
+  table: "stooq.daily"
+  ticker_column: symbol      # this table's name for the instrument column
+  date_column: timestamp     # ... and for the bar timestamp
+  read_only: true            # another loader owns it: never write, never drop
+```
+
+With `read_only: true`, `s151 load` fetches nothing: it reports which requested
+tickers the table already carries and lists the rest as absent. The guard exists
+because such a table has columns this client knows nothing about (`exchange`,
+`asset_type`), and a `DEDUP UPSERT` write would null them out.
+
+Share classes are normalised to the table's spelling (`BRK.B` → `BRK-B`) on
+every read and write, so an index membership list lines up with stooq-sourced
+bars without hand-editing.
+
+To load bars yourself instead, point `table` at a name this project owns, set
+`read_only: false`, and drop the two column overrides (the defaults are
+`ticker`/`date`). Every field also has a `QUESTDB_*` environment override —
+`QUESTDB_TABLE`, `QUESTDB_TICKER_COLUMN`, `QUESTDB_DATE_COLUMN`,
+`QUESTDB_READ_ONLY`.
+
+>>>>>>> Stashed changes
 ### If a documented flag is "unrecognized"
 
 ```
