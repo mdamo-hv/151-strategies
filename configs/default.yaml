@@ -1,13 +1,21 @@
 # Default research configuration for the 151-strategies walk-forward study.
 
 questdb:
-  host: localhost
+  host: us01
   http_port: 9000          # REST /exec and /imp endpoints
   pg_port: 8812            # Postgres wire protocol
   user: admin
   password: quest
   database: qdb
   table: "stooq.daily"     # <schema>.<table> style name, quoted in SQL
+  # The shared us01 bar table is written by the finance repo's stooq ingest and
+  # names its columns symbol/timestamp. Map the research vocabulary onto them
+  # rather than dropping 28M rows another pipeline owns.
+  ticker_column: symbol
+  date_column: timestamp
+  # That table is not ours: `s151 load` reports coverage instead of writing, so
+  # a DEDUP upsert cannot null out the exchange/asset_type columns we never send.
+  read_only: true
 
 universe:
   tickers: [NVDA, TSLA, MSFT, AMZN, WMT, JPM]

@@ -11,6 +11,7 @@ import pytest
 from strategies151.backtest.engine import asset_pnl, buy_and_hold, portfolio_pnl, walk_forward
 from strategies151.backtest.report import (
     format_ticker_performance,
+    format_universe_attribution,
     ticker_attribution,
     ticker_performance,
     universe_attribution,
@@ -118,6 +119,58 @@ def test_universe_attribution_excludes_the_benchmark(panel: Panel, cfg: Config):
     results = [walk_forward(build("3.4.low_volatility"), panel, cfg), buy_and_hold(panel, cfg)]
     universe = universe_attribution(ticker_attribution(results))
     assert (universe["strategies"] == 1).all()
+
+
+def test_universe_attribution_omits_buy_and_hold_without_performance(panel: Panel, cfg: Config):
+    universe = universe_attribution(ticker_attribution([walk_forward(build("3.4.low_volatility"), panel, cfg)]))
+    assert "buy_hold_ann_pct" not in universe.columns
+
+
+def test_universe_attribution_adds_the_buy_and_hold_benchmark(panel: Panel, cfg: Config):
+    results = [walk_forward(build("3.4.low_volatility"), panel, cfg)]
+    performance = ticker_performance(panel, index=results[0].daily.index)
+    universe = universe_attribution(ticker_attribution(results), performance)
+
+    expected = performance.set_index("ticker")["ann_return"] * 100
+    actual = universe.set_index("ticker")["buy_hold_ann_pct"]
+    pd.testing.assert_series_equal(
+        actual, expected.reindex(actual.index), check_names=False
+    )
+    assert np.allclose(
+        universe["edge_vs_buy_hold_pct"],
+        universe["per_unit_contribution_ann_pct"] - universe["buy_hold_ann_pct"],
+    )
+
+
+def test_buy_and_holds_only_edge_over_itself_is_its_cost(panel: Panel, cfg: Config):
+    """The per-unit rescaling must recover buy and hold for a strategy that is buy and hold.
+
+    Equal-weight buy and hold holds every name at a constant weight, so dividing
+    its contribution by that weight gives the name's own return back - less the
+    rebalancing cost, because contributions are net of costs while the
+    ``buy_hold_ann_pct`` benchmark is a costless paper return. Pinning the gap to
+    exactly the cost drag is what proves the rescaling itself is unbiased.
+    """
+    result = buy_and_hold(panel, cfg)
+    attribution = ticker_attribution([result])
+    attribution["style"] = "not-a-benchmark"  # keep it in the roll-up
+    performance = ticker_performance(panel, index=result.daily.index)
+    universe = universe_attribution(attribution, performance)
+
+    cost_per_unit = (
+        attribution.set_index("ticker")["cost_ann_%"]
+        / attribution.set_index("ticker")["avg_gross_weight"]
+    )
+    expected = -cost_per_unit.reindex(universe["ticker"]).to_numpy()
+    assert np.allclose(universe["edge_vs_buy_hold_pct"], expected, atol=1e-8)
+
+
+def test_format_universe_attribution_keeps_weights_visible(panel: Panel, cfg: Config):
+    """Weights on a wide universe are ~1/N, so two decimals would round them to zero."""
+    results = [walk_forward(build("3.4.low_volatility"), panel, cfg)]
+    universe = universe_attribution(ticker_attribution(results))
+    display = format_universe_attribution(universe)
+    assert (display["avg_gross_weight"] > 0).any()
 
 
 def test_ticker_performance_reports_the_headline_four(panel: Panel):

@@ -23,7 +23,9 @@ import pandas as pd
 import requests
 
 from strategies151.data.questdb import OHLCV_COLUMNS, QuestDBClient
-from strategies151.data.universe import to_stooq_symbol, to_yahoo_symbol
+from strategies151.data.universe import (
+    to_db_symbol, to_stooq_symbol, to_yahoo_symbol,
+)
 
 log = logging.getLogger(__name__)
 
@@ -284,8 +286,23 @@ def load_universe(
     other 499.
     """
     client.create_table()
+<<<<<<< HEAD
+=======
+<<<<<<< Updated upstream
+=======
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
     client.verify_schema()
     log.info("QuestDB: %s", client.build_version())
+    if client.cfg.read_only:
+        # Nothing to fetch: the table is owned by another loader, so the only
+        # useful answer is which of the requested names it already carries.
+        log.info("%s is read-only; reporting coverage instead of loading",
+                 client.cfg.table)
+        skip_existing = True
+<<<<<<< HEAD
+=======
+>>>>>>> Stashed changes
+>>>>>>> 850b8ed87f82115bb17d7f6032a3926d1ce34f9b
     existing: set[str] = set()
     if skip_existing:
         coverage = client.coverage()
@@ -294,10 +311,15 @@ def load_universe(
     rows = []
     total = len(tickers)
     for i, ticker in enumerate(tickers, start=1):
-        symbol = ticker.strip().upper()
+        symbol = to_db_symbol(ticker)
         if symbol in existing:
             rows.append({"ticker": symbol, "source": "cached", "rows": 0,
                          "first_bar": None, "last_bar": None, "error": ""})
+            continue
+        if client.cfg.read_only:
+            rows.append({"ticker": symbol, "source": "", "rows": 0,
+                         "first_bar": None, "last_bar": None,
+                         "error": f"absent from read-only table {client.cfg.table}"})
             continue
         try:
             bars = fetch_bars(symbol, source=source, start=start, end=end)

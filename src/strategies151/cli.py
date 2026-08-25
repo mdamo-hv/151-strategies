@@ -146,7 +146,10 @@ def cmd_status(args, cfg: Config) -> int:
         print(f"cannot reach QuestDB at {cfg.questdb.http_url}", file=sys.stderr)
         return 2
     print(f"table: {cfg.questdb.table}")
-    _print(client.coverage())
+    # A shared table carries thousands of names this study never reads, so the
+    # default view is the configured universe unless --all is asked for.
+    tickers = None if args.all else (args.tickers or list(cfg.universe.tickers))
+    _print(client.coverage(tickers))
     return 0
 
 
@@ -691,6 +694,9 @@ def build_parser() -> argparse.ArgumentParser:
     p_load.set_defaults(func=cmd_load)
 
     p_status = sub.add_parser("status", help="show per-ticker coverage in the bar table")
+    p_status.add_argument("tickers", nargs="*", help="tickers to report on")
+    p_status.add_argument("--all", action="store_true",
+                          help="every ticker in the table, not just the universe")
     p_status.set_defaults(func=cmd_status)
 
     p_catalog = sub.add_parser("catalog", help="list the paper's strategies and their status")
