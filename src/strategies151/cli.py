@@ -34,7 +34,7 @@ from strategies151.backtest.report import (
 from strategies151.config import REPO_ROOT, Config
 from strategies151.data.loaders import load_universe
 from strategies151.data.panel import load_panel
-from strategies151.data.questdb import QuestDBClient
+from strategies151.data.store import open_store
 from strategies151.data.universe import sp500_constituents
 from strategies151.strategies.registry import implemented_keys, resolve
 
@@ -111,9 +111,9 @@ def _version_string() -> str:
 
 # ------------------------------------------------------------------ commands --
 def cmd_load(args, cfg: Config) -> int:
-    client = QuestDBClient(cfg.questdb)
+    client = open_store(cfg, args.store)
     if not client.ping():
-        print(f"cannot reach QuestDB at {cfg.questdb.http_url}", file=sys.stderr)
+        print(f"cannot reach the bar store ({client.description})", file=sys.stderr)
         return 2
     if args.sp500:
         constituents = sp500_constituents()
@@ -143,11 +143,11 @@ def cmd_load(args, cfg: Config) -> int:
 
 
 def cmd_status(args, cfg: Config) -> int:
-    client = QuestDBClient(cfg.questdb)
+    client = open_store(cfg, args.store)
     if not client.ping():
-        print(f"cannot reach QuestDB at {cfg.questdb.http_url}", file=sys.stderr)
+        print(f"cannot reach the bar store ({client.description})", file=sys.stderr)
         return 2
-    print(f"table: {cfg.questdb.table}")
+    print(f"store: {client.description}")
     _print(client.coverage())
     return 0
 
@@ -205,7 +205,7 @@ def cmd_backtest(args, cfg: Config) -> int:
     if args.start:
         cfg = replace(cfg, universe=replace(cfg.universe, start=args.start))
 
-    panel = load_panel(cfg)
+    panel = load_panel(cfg, open_store(cfg, args.store))
     log.info(
         "panel: %s bars x %s tickers, %s to %s",
         len(panel), len(panel.tickers), panel.dates[0].date(), panel.dates[-1].date(),
@@ -364,7 +364,7 @@ def cmd_per_ticker(args, cfg: Config) -> int:
             ),
         )
 
-    panel = load_panel(cfg)
+    panel = load_panel(cfg, open_store(cfg, args.store))
     stamp = args.stamp or datetime.now().strftime("%Y%m%d%H%M")
     output_dir = Path(args.output or (REPO_ROOT / "data")) / stamp
     output_dir.mkdir(parents=True, exist_ok=True)
@@ -670,7 +670,7 @@ def cmd_significance(args, cfg: Config) -> int:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="s151",
-        description="151 Trading Strategies research track over QuestDB stooq.daily bars.",
+        description="151 Trading Strategies research track over stooq.daily bars (QuestDB or DuckDB).",
     )
     parser.add_argument("--config", help="path to a YAML config (default: configs/default.yaml)")
     parser.add_argument(
@@ -678,9 +678,13 @@ def build_parser() -> argparse.ArgumentParser:
         help="show the version, source directory and commit being run",
     )
     parser.add_argument("-v", "--log-level", default="INFO")
+    parser.add_argument(
+        "--store", choices=["questdb", "duckdb"],
+        help="where bars live: a QuestDB server (default) or a local DuckDB file",
+    )
     sub = parser.add_subparsers(dest="command", required=True)
 
-    p_load = sub.add_parser("load", help="download daily bars into QuestDB")
+    p_load = sub.add_parser("load", help="download daily bars into the bar store")
     p_load.add_argument("--tickers", nargs="+")
     p_load.add_argument("--source", choices=["auto", "stooq", "yfinance", "yahoo"])
     p_load.add_argument("--start")

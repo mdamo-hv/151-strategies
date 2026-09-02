@@ -40,6 +40,7 @@ def test_dotted_table_names_round_trip(client):
         }
     )
     assert client.insert_bars(bars) == 3
+    assert client.wait_for_writes(timeout=30)
     out = client.read_bars(["AAA", "BBB"])
     assert len(out) == 3
     assert set(out["ticker"]) == {"AAA", "BBB"}
@@ -56,6 +57,7 @@ def test_reload_is_idempotent(client):
     )
     client.insert_bars(bars)
     client.insert_bars(bars)
+    client.wait_for_writes(timeout=30)
     assert len(client.read_bars(["CCC"])) == 1
 
 
@@ -96,6 +98,7 @@ def test_insert_negotiates_a_timestamp_format(client):
     )
     client._timestamp_format = None
     client.insert_bars(bars)
+    client.wait_for_writes(timeout=30)
     assert client._timestamp_format == ("%Y-%m-%d", "yyyy-MM-dd")
 
 
@@ -106,6 +109,7 @@ def test_negotiated_format_round_trips_the_instant(client):
          "low": [0.5, 1.5], "close": [1.5, 2.5], "volume": [10.0, 20.0]}
     )
     client.insert_bars(bars)
+    client.wait_for_writes(timeout=30)
     assert list(client.read_bars(["RT"])["date"]) == list(dates)
 
 
@@ -131,3 +135,14 @@ def test_verify_schema_accepts_the_real_table(client):
 
 def test_build_version_is_readable(client):
     assert "QuestDB" in client.build_version()
+
+
+def test_wait_for_writes_returns_once_the_wal_is_applied(client):
+    """A read straight after an insert must not race the WAL."""
+    bars = pd.DataFrame(
+        {"ticker": ["WAL"], "date": pd.to_datetime(["2024-05-01"]),
+         "open": [1.0], "high": [2.0], "low": [0.5], "close": [1.5], "volume": [9.0]}
+    )
+    client.insert_bars(bars)
+    assert client.wait_for_writes(timeout=30)
+    assert len(client.read_bars(["WAL"])) == 1

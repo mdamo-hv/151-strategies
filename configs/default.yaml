@@ -1,5 +1,13 @@
 # Default research configuration for the 151-strategies walk-forward study.
 
+storage:
+  # Where bars live. Both back ends hold the same stooq.daily table.
+  #   questdb - a server in Docker; what the committed results were built on
+  #   duckdb  - a single local file, no server and no Docker
+  # Override per command with `--store duckdb`, or with S151_STORE in the env.
+  backend: questdb         # questdb | duckdb
+  duckdb_path: data/stooq.duckdb
+
 questdb:
   host: localhost
   http_port: 9000          # REST /exec and /imp endpoints

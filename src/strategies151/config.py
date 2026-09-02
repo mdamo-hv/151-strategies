@@ -34,6 +34,13 @@ class QuestDBConfig:
 
 
 @dataclass(frozen=True)
+class StorageConfig:
+    #: Where bars live: a QuestDB server, or a local DuckDB file.
+    backend: str = "questdb"
+    duckdb_path: str = "data/stooq.duckdb"
+
+
+@dataclass(frozen=True)
 class UniverseConfig:
     tickers: Sequence[str] = ("NVDA", "TSLA", "MSFT", "AMZN", "WMT", "JPM")
     start: str | None = "2015-01-01"
@@ -74,6 +81,7 @@ class SelectionConfig:
 @dataclass(frozen=True)
 class Config:
     questdb: QuestDBConfig = field(default_factory=QuestDBConfig)
+    storage: StorageConfig = field(default_factory=StorageConfig)
     universe: UniverseConfig = field(default_factory=UniverseConfig)
     data: DataConfig = field(default_factory=DataConfig)
     backtest: BacktestConfig = field(default_factory=BacktestConfig)
@@ -86,6 +94,7 @@ class Config:
         raw: dict[str, Any] = yaml.safe_load(path.read_text()) or {}
         cfg = cls(
             questdb=QuestDBConfig(**(raw.get("questdb") or {})),
+            storage=StorageConfig(**(raw.get("storage") or {})),
             universe=UniverseConfig(**(raw.get("universe") or {})),
             data=DataConfig(**(raw.get("data") or {})),
             backtest=BacktestConfig(**(raw.get("backtest") or {})),
@@ -109,4 +118,10 @@ class Config:
             database=env.get("QUESTDB_DATABASE", qdb.database),
             table=env.get("QUESTDB_TABLE", qdb.table),
         )
-        return replace(self, questdb=qdb)
+        storage = self.storage
+        backend = env.get("S151_STORE", storage.backend)
+        storage = StorageConfig(
+            backend=backend,
+            duckdb_path=env.get("S151_DUCKDB_PATH", storage.duckdb_path),
+        )
+        return replace(self, questdb=qdb, storage=storage)

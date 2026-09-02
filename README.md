@@ -529,6 +529,14 @@ cd 151-strategies
 ./scripts/bootstrap.sh          # QuestDB container + venv + install + load bars
 ```
 
+No Docker? Use the DuckDB back end instead — a single file, no server:
+
+```bash
+python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev,duckdb,yfinance]"
+./.venv/bin/s151 --store duckdb load --sp500 --source yfinance
+./.venv/bin/s151 --store duckdb backtest --sp500 --output results_sp500
+```
+
 `bootstrap.sh` loads only the six-name universe. For the index, replace its last
 step:
 
@@ -724,6 +732,45 @@ CREATE TABLE 'stooq.daily' (
 `DEDUP UPSERT KEYS` makes re-loading a date range idempotent, so extending
 history is just `s151 load` again.
 
+### Choosing where bars are stored
+
+Two interchangeable back ends hold the same `stooq.daily` table. Pick with
+`--store` on any command, or set `storage.backend` in the config.
+
+| `--store` | Needs | Setup | Notes |
+|---|---|---|---|
+| `questdb` *(default)* | Docker | `docker compose up -d questdb` | Purpose-built for time series; what the committed results were produced against. |
+| `duckdb` | `pip install duckdb` | none | One file on disk. No server, no container — the simplest option for a laptop or CI. |
+
+```bash
+./.venv/bin/s151 --store duckdb load --sp500 --source yfinance   # 503 tickers, ~40 s
+./.venv/bin/s151 --store duckdb status
+./.venv/bin/s151 --store duckdb backtest --sp500 --output results_sp500
+./.venv/bin/s151 --store duckdb per-ticker --sp500 -j 8 --output data_sp500
+```
+
+The file defaults to `data/stooq.duckdb`; override with `storage.duckdb_path`
+or `S151_DUCKDB_PATH`. A full S&P 500 load is about **150 MB**.
+
+**The choice does not change any result.** Both stores round-trip the same
+frame identically — same columns, same dtypes, same values — and both make a
+reload idempotent: QuestDB through `DEDUP UPSERT KEYS`, DuckDB through a primary
+key on `(ticker, date)` with `ON CONFLICT DO UPDATE`. `tests/test_store.py`
+inserts one frame into both and asserts the reads match.
+
+Two differences worth knowing:
+
+* **QuestDB has no schemas**, so `stooq.daily` is a single quoted table name
+  there. In DuckDB `stooq` is a real schema. Confined to the two
+  implementations; nothing else sees it.
+* **QuestDB applies WAL writes asynchronously**, so a read issued immediately
+  after a load can miss rows. `s151 load` waits for the WAL to catch up before
+  returning — exactly, by comparing `writerTxn` against `sequencerTxn`, not by
+  sleeping. DuckDB commits synchronously and needs no equivalent.
+* **DuckDB allows one writer at a time.** Not a constraint here — only `load`
+  writes, and the parallel per-ticker study reads its panel once in the parent
+  — but two concurrent loads into one file will not work.
+
 ### Choosing a data source
 
 Three interchangeable sources, all producing the same schema — split and
@@ -773,6 +820,7 @@ src/strategies151/
   config.py               typed view over configs/default.yaml
   cli.py                  s151 load | status | catalog | strategies | backtest
   data/
+    store.py              the BarStore interface, DuckDB back end, factory
     questdb.py            stooq.daily DDL, bulk /imp ingest, PG-wire reads
     loaders.py            stooq, yfinance (batched) and yahoo sources
     universe.py           S&P 500 membership, symbol conventions
@@ -794,7 +842,7 @@ src/strategies151/
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
     charts.py             research cards and the per-ticker summary chart
-tests/                    304 tests: causality, attribution, test calibration
+tests/                    322 tests: causality, attribution, store parity
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an

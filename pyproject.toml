@@ -22,6 +22,7 @@ dependencies = [
 [project.optional-dependencies]
 dev = ["pytest>=7.4"]
 yfinance = ["yfinance>=0.2.40"]
+duckdb = ["duckdb>=1.0"]
 
 [project.scripts]
 s151 = "strategies151.cli:main"

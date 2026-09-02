@@ -10,7 +10,7 @@ import numpy as np
 import pandas as pd
 
 from strategies151.config import Config
-from strategies151.data.questdb import QuestDBClient
+from strategies151.data.store import BarStore, open_store
 
 log = logging.getLogger(__name__)
 
@@ -138,11 +138,11 @@ def select_full_history(
 
 def load_panel(
     cfg: Config,
-    client: QuestDBClient | None = None,
+    client: BarStore | None = None,
     tickers: Sequence[str] | None = None,
     min_coverage: float | None = None,
 ) -> Panel:
-    client = client or QuestDBClient(cfg.questdb)
+    client = client or open_store(cfg)
     wanted = list(tickers) if tickers is not None else list(cfg.universe.tickers)
     frame = client.read_bars(wanted, cfg.universe.start, cfg.universe.end)
     if frame.empty:

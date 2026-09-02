@@ -441,7 +441,7 @@ def load_universe(
     """
     client.create_table()
     client.verify_schema()
-    log.info("QuestDB: %s", client.build_version())
+    log.info("store: %s", client.build_version())
     existing: set[str] = set()
     if skip_existing:
         coverage = client.coverage()
@@ -484,4 +484,9 @@ def load_universe(
             log.info("[%d/%d] loaded", i, total)
         if pause:
             time.sleep(pause)
+    # QuestDB applies WAL writes asynchronously, so a backtest launched right
+    # after a load could otherwise read a partially applied table.
+    waiter = getattr(client, "wait_for_writes", None)
+    if callable(waiter):
+        waiter()
     return pd.DataFrame(rows)

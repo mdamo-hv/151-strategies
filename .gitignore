@@ -220,3 +220,7 @@ __marimo__/
 # project
 .venv/
 results/**/*.png.tmp
+
+# local bar stores (regenerable with `s151 load`)
+*.duckdb
+*.duckdb.wal

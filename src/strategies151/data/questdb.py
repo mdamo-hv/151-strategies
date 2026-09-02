@@ -14,7 +14,7 @@ from strategies151.config import QuestDBConfig
 
 log = logging.getLogger(__name__)
 
-OHLCV_COLUMNS = ["ticker", "date", "open", "high", "low", "close", "volume"]
+from strategies151.data.store import OHLCV_COLUMNS  # re-exported for callers
 
 
 class QuestDBError(RuntimeError):
@@ -223,6 +223,52 @@ class QuestDBClient:
         for col in ("open", "high", "low", "close", "volume"):
             frame[col] = pd.to_numeric(frame[col], errors="coerce")
         return frame
+
+    @property
+    def description(self) -> str:
+        return f"questdb {self.cfg.http_url} table {self.cfg.table}"
+
+    def wait_for_writes(self, timeout: float = 30.0, poll: float = 0.1) -> bool:
+        """Block until the WAL has applied everything written so far.
+
+        QuestDB's WAL tables commit asynchronously: ``/imp`` returns as soon as
+        the sequencer has the transaction, and a read issued immediately
+        afterwards can miss rows. ``wal_tables()`` exposes both counters, so
+        waiting for ``writerTxn`` to catch up with ``sequencerTxn`` is exact
+        rather than a guessed sleep. Returns False on timeout.
+
+        DuckDB commits synchronously and has no equivalent, which is why this
+        lives on the QuestDB client rather than in the shared protocol.
+        """
+        import time
+
+        deadline = time.monotonic() + timeout
+        while True:
+            try:
+                payload = self.exec(
+                    "SELECT writerTxn, sequencerTxn, suspended FROM wal_tables() "
+                    f"WHERE name = '{self.cfg.table}'"
+                )
+            except Exception:  # noqa: BLE001 - a non-WAL table has nothing to wait for
+                return True
+            rows = payload.get("dataset") or []
+            if not rows:
+                return True
+            writer, sequencer, suspended = rows[0][0], rows[0][1], rows[0][2]
+            if suspended:
+                raise QuestDBError(
+                    f"table {self.cfg.table} is suspended; QuestDB stopped applying "
+                    "writes. Inspect with SELECT * FROM wal_tables()"
+                )
+            if writer >= sequencer:
+                return True
+            if time.monotonic() >= deadline:
+                log.warning(
+                    "%s: WAL still applying after %.0fs (%s of %s transactions)",
+                    self.cfg.table, timeout, writer, sequencer,
+                )
+                return False
+            time.sleep(poll)
 
     def coverage(self) -> pd.DataFrame:
         """Per-ticker row count and date range - used by the CLI status command."""
