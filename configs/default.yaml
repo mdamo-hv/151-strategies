@@ -18,11 +18,15 @@ universe:
                            # would otherwise truncate everyone else's history
 
 data:
-  # Stooq is the canonical source. `stooq` hits stooq.com's CSV endpoint, which
-  # rejects most datacenter IPs; `yahoo` produces the identical stooq schema
-  # (split/dividend adjusted OHLCV) and is used as the fallback.
-  source: auto             # auto | stooq | yahoo
+  # Stooq is the canonical source; its CSV endpoint rejects most datacenter IPs.
+  # `yfinance` uses the maintained package (pip install -e ".[yfinance]") and is
+  # the fastest option - it fetches hundreds of tickers per request. `yahoo`
+  # talks to Yahoo's chart endpoint directly and needs no extra dependency.
+  # All three produce the same schema: split/dividend adjusted OHLCV.
+  # `auto` tries stooq, then yfinance if installed, then yahoo.
+  source: auto             # auto | stooq | yfinance | yahoo
   history_years: 15
+  batch_size: 100          # tickers per bulk request (yfinance only); 1 disables
 
 backtest:
   train_days: 252          # ~1 year of trading days used for fitting/tuning

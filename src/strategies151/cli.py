@@ -125,9 +125,11 @@ def cmd_load(args, cfg: Config) -> int:
     start = args.start or (
         pd.Timestamp.today().normalize() - pd.DateOffset(years=cfg.data.history_years)
     ).strftime("%Y-%m-%d")
+    source = args.source or cfg.data.source
+    batch_size = args.batch_size if args.batch_size else cfg.data.batch_size
     report = load_universe(
-        tickers, client, source=args.source or cfg.data.source, start=start,
-        pause=args.pause, skip_existing=args.skip_existing,
+        tickers, client, source=source, start=start,
+        pause=args.pause, skip_existing=args.skip_existing, batch_size=batch_size,
     )
     failed = report[report["error"] != ""] if "error" in report else pd.DataFrame()
     _print(report.head(20) if len(report) > 20 else report)
@@ -680,7 +682,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     p_load = sub.add_parser("load", help="download daily bars into QuestDB")
     p_load.add_argument("--tickers", nargs="+")
-    p_load.add_argument("--source", choices=["auto", "stooq", "yahoo"])
+    p_load.add_argument("--source", choices=["auto", "stooq", "yfinance", "yahoo"])
     p_load.add_argument("--start")
     p_load.add_argument("--sp500", action="store_true",
                         help="load the current S&P 500 membership instead of --tickers")
@@ -688,6 +690,11 @@ def build_parser() -> argparse.ArgumentParser:
                         help="seconds to wait between tickers, to stay under rate limits")
     p_load.add_argument("--skip-existing", action="store_true",
                         help="leave tickers already present in the table untouched")
+    p_load.add_argument(
+        "--batch-size", type=int, default=0,
+        help="tickers per bulk request when the source supports it (yfinance); "
+             "0 uses the default, 1 disables batching",
+    )
     p_load.set_defaults(func=cmd_load)
 
     p_status = sub.add_parser("status", help="show per-ticker coverage in the bar table")

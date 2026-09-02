@@ -148,3 +148,151 @@ def test_circuit_breaker_resets_after_a_success(monkeypatch):
     loaders.fetch_bars("X", source="stooq")
     assert loaders._consecutive_failures["stooq"] == 0
     loaders.reset_circuit_breakers()
+
+
+# --------------------------------------------------------------------- yfinance --
+def _yf_frame(symbols, n=6, start="2024-01-02"):
+    """A yfinance-shaped download: MultiIndex (Ticker, Price) columns."""
+    index = pd.date_range(start, periods=n, freq="B", name="Date")
+    blocks = {}
+    for i, symbol in enumerate(symbols):
+        base = 100.0 * (i + 1)
+        blocks[(symbol, "Open")] = base + np.arange(n) * 0.9
+        blocks[(symbol, "High")] = base + np.arange(n) * 1.1
+        blocks[(symbol, "Low")] = base + np.arange(n) * 0.7
+        blocks[(symbol, "Close")] = base + np.arange(n)
+        blocks[(symbol, "Volume")] = np.full(n, 1_000.0 * (i + 1))
+    frame = pd.DataFrame(blocks, index=index)
+    frame.columns = pd.MultiIndex.from_tuples(frame.columns, names=["Ticker", "Price"])
+    return frame
+
+
+def test_yfinance_batch_maps_onto_the_table_schema(monkeypatch):
+    from strategies151.data.loaders import YFinanceSource
+
+    monkeypatch.setattr(
+        YFinanceSource, "_download",
+        staticmethod(lambda symbols, start, end: _yf_frame(symbols)),
+    )
+    out = YFinanceSource().fetch_many(["NVDA", "JPM"])
+    assert set(out) == {"NVDA", "JPM"}
+    assert list(out["NVDA"].columns) == OHLCV_COLUMNS
+    assert out["NVDA"]["ticker"].unique().tolist() == ["NVDA"]
+    assert out["NVDA"]["date"].dt.tz is None
+
+
+def test_yfinance_translates_share_class_symbols(monkeypatch):
+    """`BRK.B` is `BRK-B` upstream but must come back under the ticker asked for."""
+    from strategies151.data.loaders import YFinanceSource
+
+    seen = {}
+
+    def fake(symbols, start, end):
+        seen["symbols"] = list(symbols)
+        return _yf_frame(symbols)
+
+    monkeypatch.setattr(YFinanceSource, "_download", staticmethod(fake))
+    out = YFinanceSource().fetch_many(["BRK.B"])
+    assert seen["symbols"] == ["BRK-B"]
+    assert list(out) == ["BRK.B"]
+
+
+def test_yfinance_end_date_is_inclusive(monkeypatch):
+    """yfinance excludes `end`; the other sources include it."""
+    from strategies151.data.loaders import YFinanceSource
+
+    captured = {}
+
+    def fake(symbols, start, end):
+        captured["end"] = end
+        return _yf_frame(symbols)
+
+    monkeypatch.setattr(YFinanceSource, "_download", staticmethod(fake))
+    YFinanceSource().fetch_many(["NVDA"], start="2024-01-01", end="2024-01-31")
+    assert captured["end"] == "2024-02-01"
+
+
+def test_yfinance_skips_tickers_the_batch_did_not_return(monkeypatch):
+    from strategies151.data.loaders import YFinanceSource
+
+    monkeypatch.setattr(
+        YFinanceSource, "_download",
+        staticmethod(lambda symbols, start, end: _yf_frame(["NVDA"])),
+    )
+    out = YFinanceSource().fetch_many(["NVDA", "DELISTED"])
+    assert set(out) == {"NVDA"}
+
+
+def test_yfinance_single_fetch_raises_when_empty(monkeypatch):
+    from strategies151.data import loaders
+
+    monkeypatch.setattr(
+        loaders.YFinanceSource, "_download",
+        staticmethod(lambda symbols, start, end: pd.DataFrame()),
+    )
+    with pytest.raises(loaders.DataSourceError, match="no rows"):
+        loaders.YFinanceSource().fetch("NOPE")
+
+
+def test_batch_fetch_falls_back_when_the_batch_raises(monkeypatch):
+    """A failed bulk request must degrade to the per-ticker path, not abort."""
+    from strategies151.data import loaders
+
+    monkeypatch.setattr(
+        loaders.YFinanceSource, "fetch_many",
+        lambda self, tickers, start=None, end=None: (_ for _ in ()).throw(RuntimeError("boom")),
+    )
+    assert loaders._batch_fetch(["A", "B"], "yfinance", None, None, 100) == {}
+
+
+def test_batch_fetch_is_disabled_for_sources_without_it():
+    from strategies151.data import loaders
+
+    assert loaders._batch_fetch(["A"], "yahoo", None, None, 100) == {}
+    assert loaders._batch_fetch(["A"], "yfinance", None, None, 1) == {}
+
+
+def test_auto_order_skips_unavailable_sources(monkeypatch):
+    from strategies151.data import loaders
+
+    loaders.reset_circuit_breakers()
+    monkeypatch.setattr(loaders.YFinanceSource, "available", staticmethod(lambda: False))
+    tried = []
+
+    class Recorder:
+        def __init__(self, name):
+            self.name = name
+
+        def fetch(self, ticker, start=None, end=None):
+            tried.append(self.name)
+            return StooqSource._parse(ticker, STOOQ_CSV)
+
+    monkeypatch.setitem(loaders.SOURCES, "stooq", lambda: Recorder("stooq"))
+    loaders.fetch_bars("X", source="auto")
+    assert tried == ["stooq"]          # yfinance never consulted
+    loaders.reset_circuit_breakers()
+
+
+@pytest.mark.integration
+def test_yfinance_and_the_direct_yahoo_client_agree():
+    """Switching source must not change any result.
+
+    Both paths return split/dividend adjusted bars, so the close-to-close return
+    series - which is all the strategies consume - has to match.
+    """
+    from strategies151.data.loaders import YahooSource, YFinanceSource
+
+    if not YFinanceSource.available():
+        pytest.skip("yfinance not installed")
+    try:
+        a = YFinanceSource().fetch("MSFT", start="2020-01-01").set_index("date")
+        b = YahooSource().fetch("MSFT", start="2020-01-01").set_index("date")
+    except Exception as exc:  # noqa: BLE001 - network flakiness is not a failure
+        pytest.skip(f"upstream unavailable: {exc}")
+
+    shared = a.index.intersection(b.index)
+    assert len(shared) > 500
+    ra = a.loc[shared, "close"].pct_change().dropna()
+    rb = b.loc[shared, "close"].pct_change().dropna()
+    common = ra.index.intersection(rb.index)
+    assert (ra.loc[common] - rb.loc[common]).abs().max() < 1e-4

@@ -18,6 +18,7 @@ import time
 import urllib.parse
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from typing import Iterable, Sequence
 
 import pandas as pd
 import requests
@@ -210,7 +211,109 @@ class YahooSource:
         return frame.loc[:, OHLCV_COLUMNS]
 
 
-SOURCES = {"stooq": StooqSource, "yahoo": YahooSource}
+class YFinanceSource:
+    """Yahoo bars via the maintained `yfinance` package.
+
+    :class:`YahooSource` speaks to Yahoo's chart endpoint directly, which keeps
+    the project dependency-free but means this repo owns the user-agent
+    throttling, the retry policy and the response schema.  ``yfinance`` handles
+    all of that upstream, and - the reason it is worth a dependency - it fetches
+    many tickers in one request: 500 names take seconds rather than the ten
+    minutes a sequential loop needs.
+
+    ``auto_adjust=True`` returns OHLC already adjusted for splits and dividends,
+    which is the stooq convention this project stores, so no rescaling is needed.
+    """
+
+    name = "yfinance"
+    supports_batch = True
+
+    def __init__(self, timeout: float = 30.0):
+        self.timeout = timeout
+
+    @staticmethod
+    def available() -> bool:
+        try:
+            import yfinance  # noqa: F401
+        except Exception:  # noqa: BLE001 - optional dependency
+            return False
+        return True
+
+    @staticmethod
+    def _exclusive_end(end: str | None) -> str | None:
+        """yfinance excludes ``end``; every other source here includes it."""
+        if not end:
+            return None
+        return (pd.Timestamp(end) + pd.Timedelta(days=1)).strftime("%Y-%m-%d")
+
+    @staticmethod
+    def _download(symbols, start, end):
+        """Thin pass-through to yfinance - the seam tests stub."""
+        import yfinance
+
+        return yfinance.download(
+            symbols,
+            start=start,
+            end=end,
+            auto_adjust=True,
+            progress=False,
+            group_by="ticker",
+            threads=True,
+        )
+
+    @staticmethod
+    def _normalise(frame: pd.DataFrame, ticker: str) -> pd.DataFrame:
+        frame = frame.rename(columns=str.lower).reset_index()
+        frame = frame.rename(columns={frame.columns[0]: "date"})
+        frame["date"] = pd.to_datetime(frame["date"])
+        if getattr(frame["date"].dt, "tz", None) is not None:
+            frame["date"] = frame["date"].dt.tz_localize(None)
+        frame["date"] = frame["date"].dt.normalize()
+        frame["ticker"] = ticker.upper()
+        for column in ("open", "high", "low", "close", "volume"):
+            if column not in frame:
+                frame[column] = float("nan")
+            frame[column] = pd.to_numeric(frame[column], errors="coerce")
+        return frame.dropna(subset=["close"]).loc[:, OHLCV_COLUMNS]
+
+    def fetch_many(
+        self,
+        tickers: Sequence[str],
+        start: str | None = None,
+        end: str | None = None,
+    ) -> dict[str, pd.DataFrame]:
+        """Download a batch; returns only the tickers that came back with data."""
+        wanted = [t.strip().upper() for t in tickers]
+        symbols = [to_yahoo_symbol(t) for t in wanted]
+        raw = self._download(symbols, start, self._exclusive_end(end))
+        if raw is None or raw.empty:
+            return {}
+        out: dict[str, pd.DataFrame] = {}
+        for ticker, symbol in zip(wanted, symbols):
+            if isinstance(raw.columns, pd.MultiIndex):
+                if symbol not in raw.columns.get_level_values(0):
+                    continue
+                block = raw[symbol].dropna(how="all")
+            else:
+                block = raw.dropna(how="all")
+            if block.empty:
+                continue
+            frame = self._normalise(block, ticker)
+            if not frame.empty:
+                out[ticker] = frame
+        return out
+
+    def fetch(self, ticker: str, start: str | None = None, end: str | None = None) -> pd.DataFrame:
+        frames = self.fetch_many([ticker], start=start, end=end)
+        frame = frames.get(ticker.strip().upper())
+        if frame is None or frame.empty:
+            raise DataSourceError(f"yfinance returned no rows for {ticker}")
+        return frame
+
+
+SOURCES = {"stooq": StooqSource, "yfinance": YFinanceSource, "yahoo": YahooSource}
+#: Tried in this order under ``source: auto``; unavailable ones are skipped.
+AUTO_ORDER = ("stooq", "yfinance", "yahoo")
 
 
 #: Consecutive failures after which a source is skipped for the rest of the run.
@@ -241,10 +344,15 @@ def fetch_bars(
     every ticker - which is the difference between a ten-minute load and a
     four-hour one.
     """
-    order = ["stooq", "yahoo"] if source == "auto" else [source]
     if source == "auto":
+        order = [
+            name for name in AUTO_ORDER
+            if getattr(SOURCES[name], "available", lambda: True)()
+        ]
         live = [name for name in order if _source_is_open(name)]
         order = live or order[-1:]
+    else:
+        order = [source]
     errors: list[str] = []
     for name in order:
         try:
@@ -266,6 +374,53 @@ def fetch_bars(
     raise DataSourceError(f"all sources failed for {ticker} -> {errors}")
 
 
+def _batch_source(source: str):
+    """The batch-capable source to use, or None when batching does not apply."""
+    names = [source] if source != "auto" else list(AUTO_ORDER)
+    for name in names:
+        cls = SOURCES.get(name)
+        if cls is None or not getattr(cls, "supports_batch", False):
+            continue
+        if not getattr(cls, "available", lambda: True)():
+            continue
+        return cls()
+    return None
+
+
+def _batch_fetch(
+    tickers: Sequence[str],
+    source: str,
+    start: str | None,
+    end: str | None,
+    batch_size: int,
+) -> dict[str, pd.DataFrame]:
+    """Pre-fetch what a batch-capable source can serve in bulk.
+
+    Whatever does not come back - a delisted symbol, a name the batch endpoint
+    silently drops - is simply absent from the result and falls through to the
+    per-ticker path, so a partial batch degrades instead of failing.
+    """
+    if batch_size <= 1 or not tickers:
+        return {}
+    provider = _batch_source(source)
+    if provider is None:
+        return {}
+    out: dict[str, pd.DataFrame] = {}
+    for position in range(0, len(tickers), batch_size):
+        chunk = list(tickers[position : position + batch_size])
+        try:
+            fetched = provider.fetch_many(chunk, start=start, end=end)
+        except Exception as exc:  # noqa: BLE001 - fall back to one at a time
+            log.warning("batch of %d failed (%s); falling back per ticker", len(chunk), exc)
+            continue
+        out.update(fetched)
+        log.info(
+            "batch %d-%d: %d of %d tickers from %s",
+            position + 1, position + len(chunk), len(fetched), len(chunk), provider.name,
+        )
+    return out
+
+
 def load_universe(
     tickers: list[str],
     client: QuestDBClient,
@@ -275,6 +430,7 @@ def load_universe(
     pause: float = 0.0,
     skip_existing: bool = False,
     on_error: str = "warn",
+    batch_size: int = 0,
 ) -> pd.DataFrame:
     """Fetch every ticker and write it to ``stooq.daily``. Returns a load report.
 
@@ -291,6 +447,10 @@ def load_universe(
         coverage = client.coverage()
         if not coverage.empty:
             existing = {str(t) for t in coverage["ticker"]}
+
+    pending = [t.strip().upper() for t in tickers if t.strip().upper() not in existing]
+    batched = _batch_fetch(pending, source, start, end, batch_size)
+
     rows = []
     total = len(tickers)
     for i, ticker in enumerate(tickers, start=1):
@@ -298,6 +458,15 @@ def load_universe(
         if symbol in existing:
             rows.append({"ticker": symbol, "source": "cached", "rows": 0,
                          "first_bar": None, "last_bar": None, "error": ""})
+            continue
+        prefetched = batched.get(symbol)
+        if prefetched is not None:
+            inserted = client.insert_bars(prefetched)
+            rows.append({"ticker": symbol, "source": "yfinance", "rows": inserted,
+                         "first_bar": prefetched["date"].min(),
+                         "last_bar": prefetched["date"].max(), "error": ""})
+            if i % 100 == 0:
+                log.info("[%d/%d] stored", i, total)
             continue
         try:
             bars = fetch_bars(symbol, source=source, start=start, end=end)

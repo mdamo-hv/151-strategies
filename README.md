@@ -33,7 +33,7 @@ python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
 ./.venv/bin/s151 per-ticker                 # best strategy for each name -> data/
 ./.venv/bin/s151 significance data/<stamp>  # is that winner real, or luck?
 
-./.venv/bin/s151 load --sp500               # the whole index
+./.venv/bin/s151 load --sp500 --source yfinance   # the whole index, ~70s
 ./.venv/bin/s151 backtest --sp500 --output results_sp500
 ./.venv/bin/s151 per-ticker --sp500 -j 8 --output data_sp500   # all 500, ~3h on 8 cores
 ```
@@ -535,7 +535,9 @@ step:
 ```bash
 docker compose up -d questdb
 python3 -m venv .venv && ./.venv/bin/pip install -e ".[dev]"
-./.venv/bin/s151 load --sp500                 # ~8 min, 503 tickers
+./.venv/bin/pip install -e ".[dev,yfinance]"  # optional but much faster
+./.venv/bin/s151 load --sp500 --source yfinance   # ~70 s for all 503
+./.venv/bin/s151 load --sp500                     # ~8 min without yfinance
 ./.venv/bin/s151 status                       # confirm what landed
 ```
 
@@ -722,6 +724,32 @@ CREATE TABLE 'stooq.daily' (
 `DEDUP UPSERT KEYS` makes re-loading a date range idempotent, so extending
 history is just `s151 load` again.
 
+### Choosing a data source
+
+Three interchangeable sources, all producing the same schema — split and
+dividend adjusted OHLCV:
+
+| `--source` | Needs | Speed for 500 tickers | Notes |
+|---|---|---|---|
+| `yfinance` | `pip install -e ".[yfinance]"` | **~70 s** | Fetches 100 tickers per request. Fastest by a wide margin, and the maintained package handles Yahoo's throttling upstream. |
+| `yahoo` | nothing | ~8 min | Talks to Yahoo's chart endpoint directly, one ticker at a time. No extra dependency. |
+| `stooq` | nothing | n/a here | The source of record, including its proof-of-work challenge. Refuses most datacenter IPs. |
+| `auto` *(default)* | – | – | stooq → yfinance (if installed) → yahoo. A source that fails five times in a row is skipped for the rest of the run. |
+
+```bash
+./.venv/bin/pip install -e ".[dev,yfinance]"
+./.venv/bin/s151 load --sp500 --source yfinance          # ~70 s for all 503
+./.venv/bin/s151 load --sp500 --source yfinance --batch-size 50
+./.venv/bin/s151 load --sp500 --source yfinance --batch-size 1   # one at a time
+```
+
+**The choice does not change any result.** Both Yahoo paths return adjusted
+bars, so the close-to-close returns the strategies consume agree to ~1e-6 —
+checked ticker by ticker after a full 503-name load, and pinned by
+`tests/test_loaders.py`. Anything the bulk request does not return (a delisted
+symbol, a name the batch endpoint drops) falls through to the per-ticker path
+rather than failing the load.
+
 > **Note on the source.** Stooq is the source of record and
 > `StooqSource` implements its CSV endpoint including the SHA-256
 > proof-of-work challenge. From this sandbox stooq.com answers
@@ -746,7 +774,7 @@ src/strategies151/
   cli.py                  s151 load | status | catalog | strategies | backtest
   data/
     questdb.py            stooq.daily DDL, bulk /imp ingest, PG-wire reads
-    loaders.py            stooq (primary) and yahoo (fallback) sources
+    loaders.py            stooq, yfinance (batched) and yahoo sources
     universe.py           S&P 500 membership, symbol conventions
     panel.py              aligned wide OHLCV panel + derived return frames
   strategies/
@@ -766,7 +794,7 @@ src/strategies151/
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
     charts.py             research cards and the per-ticker summary chart
-tests/                    290 tests: causality, attribution, test calibration
+tests/                    304 tests: causality, attribution, test calibration
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an

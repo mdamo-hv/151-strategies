@@ -48,6 +48,9 @@ class UniverseConfig:
 class DataConfig:
     source: str = "auto"
     history_years: int = 12
+    #: Tickers per bulk request for sources that support it (yfinance). Set to
+    #: 1 to force one request per ticker.
+    batch_size: int = 100
 
 
 @dataclass(frozen=True)
