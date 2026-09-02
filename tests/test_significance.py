@@ -235,3 +235,40 @@ def test_assess_reports_both_sides_of_the_benchmark_test(assessment):
     assert assessment["p_worse_than_buy_hold"] == pytest.approx(
         1.0 - assessment["p_vs_buy_hold"]
     )
+
+
+def test_spa_does_not_invert_when_every_candidate_is_worse():
+    """A set with no superior candidate must not read as significant.
+
+    Hansen's statistic is `max(0, ...)` on both the observed value and the
+    bootstrap draws. Floor the observed one only, and a candidate set that is
+    uniformly and decisively worse than the benchmark collapses to p ~ 0: the
+    recentring holds every draw far below zero, none reaches the observed zero,
+    and the test reports the exact opposite of the truth.
+    """
+    rng = np.random.default_rng(0)
+    excess = pd.DataFrame(
+        rng.normal(-0.0015, 0.01, size=(1500, 5)), columns=[f"s{i}" for i in range(5)]
+    )
+    result = reality_check(excess, draws=1000, seed=1)
+    assert result.spa_p > 0.9
+    assert result.reality_check_p > 0.9
+
+
+def test_spa_still_finds_an_edge_among_hopeless_candidates():
+    rng = np.random.default_rng(1)
+    values = rng.normal(0.0, 0.01, size=(1500, 6))
+    values[:, 1:] -= 0.002          # hopeless
+    values[:, 0] += 0.0015          # genuine edge
+    excess = pd.DataFrame(values, columns=[f"s{i}" for i in range(6)])
+    assert reality_check(excess, draws=1000, seed=2).spa_p < 0.05
+
+
+def test_spa_p_value_is_never_below_the_reality_check_by_construction_error():
+    """Both tests answer the same question; a wild divergence signals a bug."""
+    rng = np.random.default_rng(2)
+    excess = pd.DataFrame(
+        rng.normal(-0.0015, 0.01, size=(1200, 5)), columns=[f"s{i}" for i in range(5)]
+    )
+    result = reality_check(excess, draws=800, seed=3)
+    assert abs(result.spa_p - result.reality_check_p) < 0.5

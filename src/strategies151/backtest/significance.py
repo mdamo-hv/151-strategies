@@ -256,7 +256,15 @@ def reality_check(
         # leaves the bootstrap centred on the observed statistic and the test
         # loses all power.
         recentre = np.where(studentised >= threshold, means, 0.0)
-        boot_spa = np.nanmax(np.sqrt(n) * (boot - recentre) / omega, axis=1)
+        # Hansen's statistic is max(0, max_k ...) on BOTH sides. Without the
+        # floor on the bootstrap draws, a candidate set in which every entry is
+        # decisively worse than the benchmark inverts the test: the recentring
+        # leaves those draws deeply negative, none reaches the observed 0, and
+        # the p-value collapses to ~0 - reporting "significant" for a set that
+        # contains no evidence of superiority at all.
+        boot_spa = np.maximum(
+            np.nanmax(np.sqrt(n) * (boot - recentre) / omega, axis=1), 0.0
+        )
     spa_p = float((boot_spa >= observed_spa).mean())
 
     return SuperiorityTest(

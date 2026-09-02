@@ -31,19 +31,20 @@ Three different questions, in increasing order of how much they ask:
 
 | ticker   | best_strategy              |   excess_ann_return_% |   t_stat_vs_buy_hold |   p_vs_buy_hold |   reality_check_p |   spa_p |   deflated_sharpe_prob | verdict                                    |
 |:---------|:---------------------------|----------------------:|---------------------:|----------------:|------------------:|--------:|-----------------------:|:-------------------------------------------|
-| GOOGL    | 6.5.volatility_targeting   |                -10.65 |                -2.86 |           0.998 |             1     |   0.788 |                  0.858 | lower return than buy & hold (significant) |
-| MO       | 6.5.volatility_targeting   |                 -1.89 |                -0.75 |           0.774 |             0.95  |   0.881 |                  0.668 | not distinguishable from luck              |
-| APA      | 3.11.single_moving_average |                  2.29 |                 0.08 |           0.469 |             0.811 |   0.819 |                  0.619 | not distinguishable from luck              |
-| AFL      | 6.5.volatility_targeting   |                 -5.42 |                -1.63 |           0.948 |             0.986 |   0.767 |                  0.557 | profitable, but no better than buy & hold  |
-| ABT      | 6.5.volatility_targeting   |                 -5.18 |                -2.07 |           0.981 |             0.997 |   0.827 |                  0.569 | lower return than buy & hold (significant) |
-| MMM      | 3.15.channel               |                  6.17 |                 0.65 |           0.258 |             0.64  |   0.648 |                  0.633 | profitable, but no better than buy & hold  |
-| ACN      | 6.5.volatility_targeting   |                 -2.76 |                -0.67 |           0.75  |             0.889 |   0.786 |                  0.433 | not distinguishable from luck              |
-| APD      | 6.5.volatility_targeting   |                 -4.71 |                -1.62 |           0.947 |             0.993 |   0.752 |                  0.479 | profitable, but no better than buy & hold  |
-| ARE      | 3.15.channel               |                  1.09 |                 0.09 |           0.465 |             0.829 |   0.813 |                  0.133 | not distinguishable from luck              |
+| ABT      | 6.5.volatility_targeting   |                 -5.18 |                -2.07 |           0.981 |             0.997 |   1     |                  0.569 | lower return than buy & hold (significant) |
+| ACN      | 6.5.volatility_targeting   |                 -2.76 |                -0.67 |           0.75  |             0.889 |   1     |                  0.433 | not distinguishable from luck              |
 | AES      | 6.5.volatility_targeting   |                 -6.29 |                -1.02 |           0.847 |             0.854 |   0.856 |                  0.536 | not distinguishable from luck              |
-| GOOG     | 6.5.volatility_targeting   |                 -9.5  |                -2.59 |           0.995 |             1     |   0.497 |                  0.919 | lower return than buy & hold (significant) |
+| AFL      | 6.5.volatility_targeting   |                 -5.42 |                -1.63 |           0.948 |             0.986 |   1     |                  0.557 | profitable, but no better than buy & hold  |
+| APA      | 3.11.single_moving_average |                  2.29 |                 0.08 |           0.469 |             0.811 |   0.819 |                  0.619 | not distinguishable from luck              |
+| APD      | 6.5.volatility_targeting   |                 -4.71 |                -1.62 |           0.947 |             0.993 |   1     |                  0.479 | profitable, but no better than buy & hold  |
+| ARE      | 3.15.channel               |                  1.09 |                 0.09 |           0.465 |             0.829 |   0.813 |                  0.133 | not distinguishable from luck              |
+| GOOGL    | 6.5.volatility_targeting   |                -10.65 |                -2.86 |           0.998 |             1     |   1     |                  0.858 | lower return than buy & hold (significant) |
+| GOOG     | 6.5.volatility_targeting   |                 -9.5  |                -2.59 |           0.995 |             1     |   1     |                  0.919 | lower return than buy & hold (significant) |
+| MMM      | 3.15.channel               |                  6.17 |                 0.65 |           0.258 |             0.64  |   0.648 |                  0.633 | profitable, but no better than buy & hold  |
+| MO       | 6.5.volatility_targeting   |                 -1.89 |                -0.75 |           0.774 |             0.95  |   1     |                  0.668 | not distinguishable from luck              |
 
 ![significance](significance.png)
+
 ## GOOGL
 
 **6.5 Volatility targeting with risk-free asset** — 11 of 28 strategies applicable.

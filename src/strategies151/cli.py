@@ -610,12 +610,66 @@ def _splice_significance(path: Path, block: str) -> None:
     path.write_text(text[:start] + block.rstrip() + "\n\n" + text[end:])
 
 
+def _study_significance(folder: Path, cfg: Config, args) -> int:
+    """Re-run the joint test on a `s151 backtest` folder.
+
+    The daily returns of every strategy and of the benchmark are already saved,
+    so the whole test redoes in seconds - no reason to re-run a 70-minute study
+    to change the bootstrap settings.
+    """
+    returns = pd.read_csv(folder / "daily_returns.csv", index_col=0, parse_dates=True)
+    benchmark_column = next(
+        (c for c in returns.columns if c.startswith("benchmark")), None
+    )
+    if benchmark_column is None:
+        print(f"{folder}/daily_returns.csv has no benchmark column", file=sys.stderr)
+        return 2
+    benchmark = returns.pop(benchmark_column)
+    labels = {}
+    board = folder / "leaderboard.csv"
+    if board.exists():
+        frame = pd.read_csv(board)
+        labels = {r["key"]: f"{r['section']} {r['title']}" for _, r in frame.iterrows()}
+
+    per_strategy, joint = sig.assess_study(
+        returns, benchmark, labels=labels, annualization=cfg.backtest.annualization,
+        draws=args.draws, block=args.block, seed=args.seed,
+    )
+    per_strategy.to_csv(folder / "significance_by_strategy.csv", index=False)
+    pd.DataFrame([joint]).to_csv(folder / "significance.csv", index=False)
+    significance_chart(
+        per_strategy.assign(spa_p=float("nan")), folder / "significance.png",
+        label_column="title", p_column="p_vs_benchmark", t_column="t_stat_vs_benchmark",
+        title="Does any strategy beat the equal-weighted benchmark?",
+        show_verdict=False, max_rows=20,
+        subtitle=(
+            "Each strategy's annualised return in excess of the benchmark.\n"
+            f"Best of {joint['n_candidates']} candidates: Hansen's SPA p = "
+            f"{joint['spa_p']:.3f}, Reality Check p = {joint['reality_check_p']:.3f} - "
+            "the chance of a maximum this large when no strategy has an edge."
+        ),
+    )
+    print(
+        f"best = {joint['best_title']}, excess "
+        f"{joint['best_excess_ann_return'] * 100:+.2f}%/yr, "
+        f"SPA p = {joint['spa_p']:.3f}, Reality Check p = {joint['reality_check_p']:.3f}"
+    )
+    print(f"\nwritten to {folder}")
+    return 0
+
+
 def cmd_significance(args, cfg: Config) -> int:
-    """Re-run the significance tests from a saved per-ticker folder."""
+    """Re-run the significance tests from a saved study or per-ticker folder."""
     folder = Path(args.folder)
     files = sorted(folder.glob("*_daily_returns.csv"))
+    if not files and (folder / "daily_returns.csv").exists():
+        return _study_significance(folder, cfg, args)
     if not files:
-        print(f"no *_daily_returns.csv in {folder}; run `s151 per-ticker` first", file=sys.stderr)
+        print(
+            f"no saved return series in {folder}; run `s151 per-ticker` or "
+            "`s151 backtest` first",
+            file=sys.stderr,
+        )
         return 2
     winners = pd.read_csv(folder / "best_per_ticker.csv").set_index("ticker")
 
@@ -771,7 +825,10 @@ def build_parser() -> argparse.ArgumentParser:
         "significance",
         help="re-run the significance tests on a saved per-ticker folder",
     )
-    p_sig.add_argument("folder", help="a data/YYYYMMDDHHMM directory")
+    p_sig.add_argument(
+        "folder",
+        help="a per-ticker folder (data/YYYYMMDDHHMM) or a backtest output folder",
+    )
     p_sig.add_argument("--draws", type=int, default=5000, help="bootstrap resamples")
     p_sig.add_argument("--block", type=float, default=10.0,
                        help="expected stationary-bootstrap block length, in days")

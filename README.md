@@ -342,20 +342,20 @@ separate questions:
 
 ![Is the edge real](data/202608231618/significance.png)
 
-| Ticker | Excess ann. return | t-stat | p vs buy & hold | Reality Check p | SPA p | Deflated Sharpe | Verdict |
-|---|---:|---:|---:|---:|---:|---:|---|
-| **MSFT** | -10.3% | -2.88 | 1.00 | 1.00 | **0.61** | 0.70 | lower return than buy & hold (significant) |
-| **WMT** | -2.3% | -1.05 | 0.85 | 0.99 | **0.69** | 0.88 | profitable, but no better than buy & hold |
-| **NVDA** | -10.6% | -1.35 | 0.91 | 0.99 | **0.70** | 0.97 | profitable, but no better than buy & hold |
-| **JPM** | -7.0% | -1.53 | 0.94 | 1.00 | **0.75** | 0.66 | profitable, but no better than buy & hold |
-| **AMZN** | -13.2% | -2.61 | 1.00 | 1.00 | **0.80** | 0.68 | lower return than buy & hold (significant) |
-| **TSLA** | -35.7% | -2.63 | 1.00 | 0.99 | **0.87** | 0.82 | lower return than buy & hold (significant) |
+| Ticker | Best strategy | Excess ann. return | t-stat | p vs buy & hold | RC p | SPA p | Deflated Sharpe | Verdict |
+|---|---|---:|---:|---:|---:|---:|---:|---|
+| **WMT** | 6 5.volatility_targeting | -2.3% | -1.05 | 0.85 | 0.99 | **1.00** | 0.88 | profitable, but no better than buy & hold |
+| **JPM** | 4 6.multi_asset_trend | -7.0% | -1.53 | 0.94 | 1.00 | **1.00** | 0.66 | profitable, but no better than buy & hold |
+| **MSFT** | 6 5.volatility_targeting | -10.3% | -2.88 | 1.00 | 1.00 | **1.00** | 0.70 | lower return than buy & hold (significant) |
+| **NVDA** | 4 1.2.dual_momentum | -10.6% | -1.35 | 0.91 | 0.99 | **1.00** | 0.97 | profitable, but no better than buy & hold |
+| **AMZN** | 6 5.volatility_targeting | -13.2% | -2.61 | 1.00 | 1.00 | **1.00** | 0.68 | lower return than buy & hold (significant) |
+| **TSLA** | 6 5.volatility_targeting | -35.7% | -2.63 | 1.00 | 0.99 | **1.00** | 0.82 | lower return than buy & hold (significant) |
 
 ### The answer is no, on every ticker
 
-**Not one strategy survives the selection correction.** SPA p-values run 0.61 to
-0.87 — the observed maximum is exactly what 11 candidates produce by chance when
-none of them has an edge. Reality Check p-values are 0.98–1.00, and the Deflated
+**Not one strategy survives the selection correction.** SPA p-values are all
+1.00 — the observed maximum is exactly what 11 candidates produce by chance
+when none of them has an edge. Reality Check p-values are 0.99–1.00, and the Deflated
 Sharpe probabilities (0.66–0.97) sit below the ~0.95 you would want before
 believing a Sharpe that was chosen rather than pre-registered.
 
@@ -460,7 +460,7 @@ quantitatively.
 **No. Zero of 28 strategies have a positive excess return over the
 equal-weighted benchmark.** The best (4.1 momentum rotation) is
 -0.71%/yr, and the joint test over all 28
-candidates gives **Hansen's SPA p = 0.730**, Reality Check p =
+candidates gives **Hansen's SPA p = 1.000**, Reality Check p =
 0.969.
 
 One strategy is worth a second look on risk-adjusted terms: **4.1.2
@@ -500,8 +500,42 @@ sector-spread subset instead (11 of them clear the history filter):
 | **AES** | 6 5.volatility_targeting | -6.3% | 0.85 | **0.86** | not distinguishable from luck |
 | **MO** | 6 5.volatility_targeting | -1.9% | 0.77 | **0.88** | not distinguishable from luck |
 
-**0 of 11 survive**, SPA p-values 0.50–0.88 — the same answer the six-name
-study gave, on a different and larger sample.
+**0 of 11 survive**, SPA p-values 0.65–1.00 — the same answer the
+six-name study gave, on a different and larger sample.
+
+### The one place a return edge does show up
+
+The six-name study has its own joint test, and it does not read like the index one:
+
+| | Six mega-caps | S&P 500 (437 names) |
+|---|---:|---:|
+| Best strategy by excess return | 4.1 Momentum rotation | 4.1 Momentum rotation |
+| Excess annualised return | **+22.35%** | -0.71% |
+| Its own t-test vs benchmark | p = 0.010 | p = 0.61 |
+| Reality Check p | 0.075 | 0.969 |
+| **Hansen's SPA p** | **0.042** | **1.000** |
+| Deflated Sharpe probability | 0.50 | 0.00 |
+| P(true Sharpe > benchmark) | 0.38 | 0.42 |
+
+On six names, momentum rotation earns **22.4%/yr more than the benchmark**, and
+that survives the selection correction at 5% on SPA (0.042) though not on the
+more conservative Reality Check (0.075). Read it carefully before believing it:
+
+* **The Sharpe-based tests disagree with the return-based ones.** The Deflated
+  Sharpe probability is 0.50 — a coin flip — and P(true Sharpe > benchmark)
+  is 0.38. The strategy wins on *return* while running 44.6% volatility
+  against the benchmark's 25.4%. RC and SPA test mean excess return, so they
+  see the first and not the second.
+* **It is a levered bet on one stock.** The attribution above shows NVDA
+  produced 58% of that strategy's P&L over a decade in which NVDA compounded
+  at 72%/yr.
+* **It vanishes with breadth.** The same strategy on 437 names earns
+  -0.71%/yr with SPA p = 1.000.
+
+So the honest reading is not "momentum rotation works" but "on a six-name
+universe dominated by the decade's best stock, a concentrated long-only momentum
+rule captures that stock, and a return-based test cannot tell that apart from
+skill."
 
 ### Two survivorship filters, both stated
 
@@ -842,7 +876,7 @@ src/strategies151/
     metrics.py            Sharpe, Calmar, drawdown, turnover, cost drag
     report.py             leaderboard, per-ticker attribution, summary, plots
     charts.py             research cards and the per-ticker summary chart
-tests/                    322 tests: causality, attribution, store parity
+tests/                    325 tests: causality, attribution, store parity
 ```
 
 Every strategy carries the paper's equation numbers in its docstring, so an

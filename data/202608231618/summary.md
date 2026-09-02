@@ -26,12 +26,12 @@ Three different questions, in increasing order of how much they ask:
 
 | ticker   | best_strategy            |   excess_ann_return_% |   t_stat_vs_buy_hold |   p_vs_buy_hold |   reality_check_p |   spa_p |   deflated_sharpe_prob | verdict                                    |
 |:---------|:-------------------------|----------------------:|---------------------:|----------------:|------------------:|--------:|-----------------------:|:-------------------------------------------|
-| AMZN     | 6.5.volatility_targeting |                -13.19 |                -2.61 |           0.996 |             0.998 |   0.8   |                  0.677 | lower return than buy & hold (significant) |
-| JPM      | 4.6.multi_asset_trend    |                 -6.99 |                -1.53 |           0.937 |             0.998 |   0.754 |                  0.658 | profitable, but no better than buy & hold  |
-| MSFT     | 6.5.volatility_targeting |                -10.33 |                -2.88 |           0.998 |             0.997 |   0.608 |                  0.7   | lower return than buy & hold (significant) |
-| NVDA     | 4.1.2.dual_momentum      |                -10.6  |                -1.35 |           0.911 |             0.991 |   0.702 |                  0.97  | profitable, but no better than buy & hold  |
-| TSLA     | 6.5.volatility_targeting |                -35.7  |                -2.63 |           0.996 |             0.994 |   0.87  |                  0.822 | lower return than buy & hold (significant) |
-| WMT      | 6.5.volatility_targeting |                 -2.26 |                -1.05 |           0.853 |             0.985 |   0.685 |                  0.882 | profitable, but no better than buy & hold  |
+| AMZN     | 6.5.volatility_targeting |                -13.19 |                -2.61 |           0.996 |             0.998 |       1 |                  0.677 | lower return than buy & hold (significant) |
+| JPM      | 4.6.multi_asset_trend    |                 -6.99 |                -1.53 |           0.937 |             0.998 |       1 |                  0.658 | profitable, but no better than buy & hold  |
+| MSFT     | 6.5.volatility_targeting |                -10.33 |                -2.88 |           0.998 |             0.997 |       1 |                  0.7   | lower return than buy & hold (significant) |
+| NVDA     | 4.1.2.dual_momentum      |                -10.6  |                -1.35 |           0.911 |             0.991 |       1 |                  0.97  | profitable, but no better than buy & hold  |
+| TSLA     | 6.5.volatility_targeting |                -35.7  |                -2.63 |           0.996 |             0.994 |       1 |                  0.822 | lower return than buy & hold (significant) |
+| WMT      | 6.5.volatility_targeting |                 -2.26 |                -1.05 |           0.853 |             0.985 |       1 |                  0.882 | profitable, but no better than buy & hold  |
 
 ![significance](significance.png)
 

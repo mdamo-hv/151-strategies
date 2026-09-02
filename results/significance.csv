@@ -1,2 +1,2 @@
 best_strategy,best_title,n_candidates,n_days,best_excess_ann_return,reality_check_p,spa_p,deflated_sharpe_prob,luck_threshold_sharpe_ann,psr_vs_benchmark,bootstrap_draws,bootstrap_block
-4.1.momentum_rotation,4.1 Momentum rotation,28,2624,-0.0071000035944811775,0.9692,1.0,6.53666157519559e-21,3.87886449585365,0.4161148853148854,5000,10.0
+4.1.momentum_rotation,4.1 Momentum rotation,28,2624,0.2235170591767517,0.0752,0.0416,0.5001602096065073,1.2904847902941297,0.3780648622413382,5000,10.0
